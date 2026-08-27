@@ -1,0 +1,429 @@
+# Design principles and identity
+
+[← Specification index](../SPECS.md)
+
+# 2. Design principles
+
+## 2.1 Implementations are not APIs
+
+Software identity must never become the public API identity.
+
+A process may identify itself as:
+
+```text
+client.id = "superserviced"
+```
+
+while simultaneously providing:
+
+```text
+bus://services
+```
+
+Applications should communicate with:
+
+```text
+bus://services
+```
+
+when they need the standardized service-management API.
+
+They should communicate with a specific software implementation only when intentionally using implementation-specific extensions.
+
+---
+
+## 2.2 The broker is protocol-neutral regarding payloads
+
+`busd` routes packets.
+
+It does not need to understand their payload.
+
+```text
+┌────────────── header ──────────────┐
+│ routing information                │
+│ message type                       │
+│ correlation information            │
+│ sender metadata                    │
+│ delivery requirements              │
+└────────────────────────────────────┘
+
+┌────────────── payload ─────────────┐
+│ arbitrary bytes                    │
+└────────────────────────────────────┘
+```
+
+The receiver decides how to interpret the payload.
+
+Possible payload formats include:
+
+* custom binary protocols;
+* FlatBuffers;
+* Protocol Buffers;
+* MessagePack;
+* CBOR;
+* JSON;
+* raw structs with a standardized ABI;
+* compressed data;
+* encrypted data;
+* application-defined encodings.
+
+The broker must not require any particular serialization framework.
+
+---
+
+## 2.3 Peer identity and API identity are separate
+
+Every connection has several independent identities:
+
+```text
+Peer ID
+    unique connection assigned by busd
+
+Client ID
+    non-unique software identifier supplied by client
+
+Peer headers
+    advertised software metadata
+
+Credentials
+    broker-verified operating-system identity
+
+Namespaces
+    optionally owned APIs
+
+Channels
+    optionally subscribed multicast groups
+```
+
+These concepts must never be collapsed into one identifier.
+
+---
+
+## 2.4 Channels do not have owners
+
+A channel is not a service.
+
+For example:
+
+```text
+system.hardware.events
+network.events
+service.events
+desktop.notifications
+```
+
+may have:
+
+```text
+0..N publishers
+0..N subscribers
+```
+
+There is no process that owns the channel.
+
+Channels exist only as routing constructs.
+
+---
+
+## 2.5 Namespace ownership is exclusive by default
+
+An API namespace normally has exactly one current provider.
+
+```text
+Peer A:
+
+CLAIM bus://services
+    → OK
+```
+
+followed by:
+
+```text
+Peer B:
+
+CLAIM bus://services
+    → ERROR_ALREADY_OWNED
+```
+
+When Peer A disconnects, the namespace becomes available again.
+
+This enables replaceable implementations without requiring consumers to know which implementation is active.
+
+---
+
+# 3. Terminology
+
+## 3.1 Broker
+
+The `busd` process.
+
+It owns the local IPC socket, authenticates connections and routes messages.
+
+---
+
+## 3.2 Peer
+
+One active connection to the broker.
+
+A single process may theoretically create multiple peers.
+
+Every peer receives a broker-generated unique identifier:
+
+```text
+PeerId
+```
+
+Example:
+
+```text
+:1
+:2
+:3
+```
+
+or an equivalent binary identifier.
+
+Peer IDs are:
+
+* unique;
+* ephemeral;
+* broker assigned;
+* valid only during a bus instance.
+
+They must never be treated as persistent software identities.
+
+---
+
+## 3.3 Client ID
+
+A peer may advertise a `client.id`.
+
+Example:
+
+```text
+client.id = "serviced"
+```
+
+or:
+
+```text
+client.id = "org.example.superserviced"
+```
+
+Unlike `PeerId`, a Client ID is deliberately **not unique**.
+
+Multiple processes may simultaneously connect with:
+
+```text
+client.id = "foo"
+```
+
+This allows Client ID to represent the software implementation rather than a specific process.
+
+For example:
+
+```text
+Peer :27
+client.id = "browser"
+
+Peer :31
+client.id = "browser"
+
+Peer :42
+client.id = "browser"
+```
+
+may represent three browser processes.
+
+A Client ID is primarily useful for:
+
+* implementation discovery;
+* protocol extensions;
+* debugging;
+* compatibility checks;
+* targeted multicast;
+* feature negotiation.
+
+It must **not** be considered proof of identity.
+
+A malicious process can claim:
+
+```text
+client.id = "serviced"
+```
+
+unless security policy explicitly prevents it.
+
+---
+
+# 4. Peer metadata
+
+Every peer can register metadata at connection time.
+
+Example:
+
+```text
+client.id       = "superserviced"
+client.version  = "2.4.1"
+
+protocol.foo    = "2"
+protocol.bar    = true
+
+feature.jobs-v2 = true
+feature.foo     = true
+```
+
+These values are called **peer headers**.
+
+Peer headers differ from message headers because they describe the connection rather than an individual packet.
+
+---
+
+# 5. Header classes
+
+There should be three classes of metadata.
+
+## 5.1 Claimed headers
+
+Provided by the client.
+
+Examples:
+
+```text
+client.id
+client.version
+application.name
+protocol.foo
+feature.fast-start
+vendor.extension
+```
+
+These are untrusted unless policy explicitly verifies them.
+
+---
+
+## 5.2 Broker headers
+
+Generated by `busd`.
+
+Examples:
+
+```text
+peer.id
+process.pid
+process.uid
+process.gid
+process.exe
+process.cgroup
+process.security_label
+connection.time
+```
+
+On Linux these should be derived from trusted kernel information where possible.
+
+For a Unix domain socket, credentials such as PID, UID and GID can be obtained from the peer instead of trusting data supplied by the application.
+
+Clients must not be allowed to forge broker headers.
+
+---
+
+## 5.3 Message headers
+
+Associated with one packet.
+
+Examples:
+
+```text
+content.type
+content.schema
+content.encoding
+
+trace.id
+extension.foo
+priority
+deadline
+```
+
+Message headers are separate from peer headers.
+
+---
+
+# 6. Sender metadata delivery
+
+When `busd` delivers a message, the recipient must be able to inspect information about the sender.
+
+Conceptually:
+
+```text
+ReceivedMessage {
+    sender: {
+        peer_id,
+        client_id,
+        credentials,
+        headers
+    },
+
+    message: {
+        ...
+    }
+}
+```
+
+The sender information attached by the broker cannot be modified by the sending process after routing.
+
+This allows code such as:
+
+```rust
+if message.sender.client_id == "superserviced-client" {
+    ...
+}
+```
+
+More importantly, extension negotiation can use explicit capability headers:
+
+```rust
+if message.sender.headers.contains("protocol.superservice.v2") {
+    ...
+}
+```
+
+rather than depending exclusively on Client ID.
+
+---
+
+# 7. Client ID is not an authentication mechanism
+
+This distinction is critical.
+
+This:
+
+```text
+client.id = "trusted-admin"
+```
+
+does not mean:
+
+```text
+this process is trusted
+```
+
+Authorization should instead use broker-attested attributes such as:
+
+```text
+UID
+GID
+PID
+executable
+security label
+cgroup
+capabilities
+namespace ownership
+policy grants
+```
+
+Client IDs and custom headers are discovery metadata unless policy elevates them.
+
+---
+
+
+

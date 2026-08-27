@@ -1,0 +1,171 @@
+# Software architecture
+
+[← Specification index](../SPECS.md)
+
+# 56. Software architecture
+
+The Rust project should be split into reusable crates.
+
+Possible structure:
+
+```text
+bus/
+├── bus-protocol
+├── bus-client
+├── bus-transport-unix
+├── bus-transport-dbus
+├── bus-broker
+├── bus-policy
+└── busd
+```
+
+---
+
+# 57. `bus-protocol`
+
+Contains only protocol-level structures.
+
+Example:
+
+```rust
+Message
+MessageId
+PeerId
+Namespace
+Channel
+Headers
+Filter
+Destination
+AckPolicy
+DeliveryPolicy
+Request
+Response
+```
+
+No sockets.
+
+No broker.
+
+No D-Bus.
+
+---
+
+# 58. `bus-client`
+
+High-level API used by applications.
+
+Conceptually:
+
+```rust
+let bus = Bus::connect().await?;
+
+bus.claim("bus://foo").await?;
+
+bus.subscribe("foo.events").await?;
+
+bus.publish(
+    "foo.events",
+    payload
+).await?;
+```
+
+---
+
+# 59. `bus-transport-unix`
+
+Native BUS/1 transport implementation.
+
+Responsible for:
+
+```text
+AF_UNIX
+SOCK_SEQPACKET
+packet framing
+SCM_RIGHTS
+peer credentials
+```
+
+---
+
+# 60. `bus-transport-dbus`
+
+Optional D-Bus transport implementation.
+
+Allows BUS-aware software to operate directly on a D-Bus system without `busd`.
+
+This crate does not need to be linked into minimal builds.
+
+---
+
+# 61. `bus-broker`
+
+Contains generic broker state:
+
+```text
+peers
+namespaces
+subscriptions
+routing
+ACK tracking
+request tracking
+retry scheduling
+queues
+capabilities
+```
+
+It should ideally be mostly independent of the concrete socket listener.
+
+---
+
+# 62. `bus-policy`
+
+Contains security policy parsing and authorization.
+
+Keeping this separate makes the policy engine testable without running the broker.
+
+---
+
+# 63. `busd`
+
+Small executable assembling:
+
+```text
+broker
+native transport
+policy
+optional D-Bus frontend
+logging
+configuration
+```
+
+---
+
+# 64. Feature flags
+
+Example Cargo configuration:
+
+```toml
+[features]
+default = ["unix"]
+
+unix = [...]
+dbus = [...]
+monitoring = [...]
+```
+
+Minimal system:
+
+```text
+busd = unix
+```
+
+Desktop-compatible system:
+
+```text
+busd = unix + dbus
+```
+
+---
+
+
+
