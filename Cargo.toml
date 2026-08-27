@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/bus-protocol",
+    "crates/bus-client",
+    "crates/bus-policy",
+    "crates/bus-broker",
+    "crates/bus-transport-unix",
+    "crates/busd",
+]
+default-members = ["crates/busd"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Sammwy"]
+license = "Apache-2.0"
+repository = "https://github.com/sammwyy/busd"
+homepage = "https://github.com/sammwyy/busd"
+keywords = ["ipc", "message-bus", "linux", "unix-socket"]
+categories = ["network-programming", "os::unix-apis"]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
