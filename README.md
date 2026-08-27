@@ -44,7 +44,9 @@ The interactive client accepts one hexadecimal packet per line and exits with `q
 
 BUS/1 keeps peer identity, claimed client identity, credentials, namespace ownership, and unowned channel subscriptions separate. It does not define application APIs or payload encodings.
 
-See [SPECS.md](SPECS.md) for the design specification.
+See the [documentation index](docs/README.md) for the project documentation,
+the [BUS/1 specification](docs/SPECS.md) for the design, and
+[ROADMAP.md](ROADMAP.md) for implementation milestones.
 
 Applications should depend on `bus-client`, not the transport crate directly:
 

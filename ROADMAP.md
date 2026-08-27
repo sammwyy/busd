@@ -32,13 +32,13 @@ layers. Checkboxes record repository status, not an estimated schedule.
   broker state.
 - [x] Bind and connect native `AF_UNIX` `SOCK_SEQPACKET` sockets.
 - [x] Keep raw transport diagnostics explicitly separate from the application API.
-- [ ] Add a CI workflow that runs formatting, Clippy, unit tests, and documentation checks.
-- [ ] Define the project's supported Linux and Rust-version test matrix.
+- [x] Add a CI workflow that runs formatting, Clippy, unit tests, and documentation checks.
+- [x] Define the project's supported Linux and Rust-version test matrix.
 
 **Exit criteria**
 
 - [x] The workspace builds and its current unit tests demonstrate the stated core invariants.
-- [ ] Every later phase can add functionality without changing crate ownership casually.
+- [x] Every later phase can add functionality without changing crate ownership casually.
 
 ## Phase 1 — Freeze the BUS/1 wire protocol
 

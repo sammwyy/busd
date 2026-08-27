@@ -10,6 +10,14 @@
 
 ---
 
+## Project documentation
+
+For implementation status, contribution rules, and the supported environment,
+see the [foundation guide](development/foundation.md). For planned work, see
+the [project roadmap](../ROADMAP.md).
+
+---
+
 ## 1. Overview
 
 `busd` is a generic local message broker intended for communication between operating-system components, daemons, desktop services, applications, and other processes.
@@ -91,4 +99,3 @@ Read the chapters in order for the complete specification, or jump to a topic:
 9. [Resilience and architectural model](specification/09-resilience-and-architecture.md)
 
 Each chapter retains the original section numbers so references to BUS/1 remain stable.
-
