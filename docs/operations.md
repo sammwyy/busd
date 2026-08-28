@@ -113,6 +113,18 @@ Check that a running daemon accepts native connections with:
 busd health --socket /run/busd/busd.sock
 ```
 
+## Verification
+
+The workspace test suite includes deterministic arbitrary-input coverage for the
+frame parser and randomized broker-state transitions. Run the standard native
+checks before deployment changes:
+
+```text
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
 ## Troubleshooting
 
 Use the daemon's structured diagnostics to identify a denied operation by peer

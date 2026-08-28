@@ -1917,4 +1917,68 @@ mod tests {
             Err(Error::InvalidPriority)
         );
     }
+
+    #[test]
+    fn arbitrary_state_transitions_do_not_panic() {
+        let result = std::panic::catch_unwind(|| {
+            let mut broker = Broker::new(AllowAll);
+            let peers: Vec<_> = (0..4)
+                .map(|_| {
+                    broker
+                        .connect(credentials(), ClientHello::default())
+                        .unwrap()
+                })
+                .collect();
+            let mut seed = 0x9c4d_6e8f_1234_5678_u64;
+            for index in 0..1_024_u64 {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let peer = peers[(seed as usize) % peers.len()];
+                let other = peers[((seed >> 8) as usize) % peers.len()];
+                match (seed >> 16) % 5 {
+                    0 => {
+                        let _ = broker.claim(
+                            peer,
+                            Namespace::parse(format!("bus://service-{}", seed % 8)).unwrap(),
+                        );
+                    }
+                    1 => {
+                        let _ = broker.subscribe(
+                            peer,
+                            Channel::parse(format!("events-{}", seed % 8)).unwrap(),
+                        );
+                    }
+                    2 => {
+                        let channel = Channel::parse(format!("events-{}", seed % 8)).unwrap();
+                        let _ = broker.unsubscribe(peer, &channel);
+                    }
+                    3 => {
+                        let _ = broker.route(peer, &Destination::Peer(other), &Headers::new());
+                    }
+                    _ => {
+                        let _ = broker.begin_delivery(
+                            peer,
+                            Frame::Message {
+                                kind: MessageKind::Signal,
+                                ack_policy: AckPolicy::None,
+                                ack_requirement: AckRequirement::None,
+                                request_policy: RequestPolicy::Exact,
+                                deadline_ms: 0,
+                                retry: RetryPolicy::None,
+                                destination: Destination::Peer(other),
+                                message_id: MessageId::new(
+                                    index.to_be_bytes().repeat(2).try_into().unwrap(),
+                                ),
+                                correlation_id: MessageId::absent(),
+                                status: Status::Success,
+                                headers: Headers::new(),
+                                payload: Vec::new(),
+                            },
+                            index,
+                        );
+                    }
+                }
+            }
+        });
+        assert!(result.is_ok());
+    }
 }

@@ -135,27 +135,27 @@ layers. Checkboxes record repository status, not an estimated schedule.
 
 **Milestone:** M4 — Secure native 1.0.
 
-- [ ] Define a versioned, documented policy configuration format in `bus-policy`.
-- [ ] Authorize connection, claims, sends, publishes, subscriptions, broadcasts,
+- [x] Define a versioned, documented policy configuration format in `bus-policy`.
+- [x] Authorize connection, claims, sends, publishes, subscriptions, broadcasts,
   acknowledgements, monitoring, and future D-Bus registration separately.
-- [ ] Support rules based on broker-authenticated credentials and, where available,
+- [x] Support rules based on broker-authenticated credentials and, where available,
   executable path, security label, and cgroup.
-- [ ] Treat client IDs and claimed headers as untrusted unless an explicit policy rule uses them.
-- [ ] Set configurable limits for packet size, queued bytes, queued messages,
+- [x] Treat client IDs and claimed headers as untrusted unless an explicit policy rule uses them.
+- [x] Set configurable limits for packet size, queued bytes, queued messages,
   in-flight requests, subscriptions, and namespace claims.
-- [ ] Add queue backpressure and priority scheduling; never allow priority to bypass authorization.
-- [ ] Add safe handling for oversized packets, malformed frames, allocation pressure,
+- [x] Add queue backpressure and priority scheduling; never allow priority to bypass authorization.
+- [x] Add safe handling for oversized packets, malformed frames, allocation pressure,
   and abusive peers.
-- [ ] Add privileged monitoring with metadata redaction and policy enforcement.
-- [ ] Add structured logs, metrics, health checks, and an operational troubleshooting guide.
-- [ ] Fuzz the frame parser and broker state transitions; run sanitizers or equivalent
+- [x] Add privileged monitoring with metadata redaction and policy enforcement.
+- [x] Add structured logs, metrics, health checks, and an operational troubleshooting guide.
+- [x] Fuzz the frame parser and broker state transitions; run sanitizers or equivalent
   memory-safety checks where practical.
 
 **Exit criteria**
 
-- [ ] A default installation is deny-by-policy for privileged operations and has documented safe defaults.
-- [ ] Resource exhaustion and malformed peers are isolated to the offending connection.
-- [ ] Operators can determine who connected, what was denied, and why without logging opaque payloads by default.
+- [x] A default installation is deny-by-policy for privileged operations and has documented safe defaults.
+- [x] Resource exhaustion and malformed peers are isolated to the offending connection.
+- [x] Operators can determine who connected, what was denied, and why without logging opaque payloads by default.
 
 ## Phase 6 — Complete the native client and Linux data paths
 
