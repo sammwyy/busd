@@ -40,5 +40,6 @@ dependencies = [
  "bus-broker",
  "bus-client",
  "bus-policy",
+ "bus-protocol",
  "bus-transport-unix",
 ]

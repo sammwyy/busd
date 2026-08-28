@@ -1,7 +1,7 @@
 # Foundation guide
 
 This guide defines the project rules established in roadmap phase 0. It is the
-reference for contributors before the BUS/1 wire protocol is introduced.
+reference for contributors through the BUS/1-preview wire-protocol phase.
 
 ## Supported environments
 
@@ -37,7 +37,7 @@ busd (binary assembly)
 
 | Crate | Owns | Must not own |
 | --- | --- | --- |
-| `bus-protocol` | Transport-independent types and, later, the BUS/1 codec | Sockets, broker state, policy, or D-Bus integration |
+| `bus-protocol` | Transport-independent types and the BUS/1-preview codec | Sockets, broker state, policy, or D-Bus integration |
 | `bus-policy` | Authenticated credentials and authorization decisions | Socket credential collection or message routing |
 | `bus-broker` | Peer lifecycle, namespaces, subscriptions, routing, and delivery state | Listener lifecycle or application payload semantics |
 | `bus-transport-unix` | Linux `AF_UNIX` transport, packet boundaries, and future FD passing | BUS routing and policy decisions |
@@ -52,14 +52,16 @@ unsafe FFI boundary needed for Linux sockets. All other crates remain
 
 The current implementation is a scaffold, not a complete BUS/1 broker:
 
-- `bus-protocol` models core identifiers, headers, message kinds, and
-  acknowledgement policy, but does not yet define the wire ABI.
+- `bus-protocol` owns the versioned BUS/1-preview ABI, canonical codec, and
+  packet validation limits.
 - `bus-broker` stores peers, exclusive namespace ownership, and unowned channel
   subscriptions, but does not execute routed messages.
-- `bus-transport-unix` sends and receives bounded raw packets for diagnostics.
-- `busd` accepts native connections but does not yet dispatch BUS/1 frames.
+- `bus-transport-unix` preserves bounded native packet boundaries below the
+  BUS/1 API.
+- `busd` accepts and validates BUS/1-preview frames but does not yet dispatch
+  sessions or route messages.
 
-Do not present raw diagnostic packets as a supported application protocol.
+Do not expose raw native packets through an application API.
 
 ## Required local checks
 

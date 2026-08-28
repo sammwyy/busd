@@ -44,24 +44,24 @@ layers. Checkboxes record repository status, not an estimated schedule.
 
 **Milestone:** M1 — Wire protocol preview.
 
-- [ ] Write `docs/wire-protocol.md` as the normative packet-format specification.
-- [ ] Define a bounded frame envelope: magic/version, frame kind, flags, length,
+- [x] Write `docs/wire-protocol.md` as the normative packet-format specification.
+- [x] Define a bounded frame envelope: magic/version, frame kind, flags, length,
   destination selector, message identifiers, headers, and payload.
-- [ ] Define a canonical binary representation for names, IDs, header values,
+- [x] Define a canonical binary representation for names, IDs, header values,
   filters, acknowledgement policies, statuses, and protocol errors.
-- [ ] Specify byte order, size limits, duplicate-header handling, reserved fields,
+- [x] Specify byte order, size limits, duplicate-header handling, reserved fields,
   and forward-compatible unknown-field behavior.
-- [ ] Define control frames for `HELLO`, `WELCOME`, claim, subscribe,
+- [x] Define control frames for `HELLO`, `WELCOME`, claim, subscribe,
   unsubscribe, and protocol errors.
-- [ ] Implement encoder and decoder types in `bus-protocol` without socket dependencies.
-- [ ] Reject malformed, truncated, oversized, and non-canonical frames before allocating unbounded memory.
-- [ ] Add golden vectors plus encode/decode, boundary, and fuzz/property tests.
+- [x] Implement encoder and decoder types in `bus-protocol` without socket dependencies.
+- [x] Reject malformed, truncated, oversized, and non-canonical frames before allocating unbounded memory.
+- [x] Add golden vectors plus encode/decode, boundary, and fuzz/property tests.
 
 **Exit criteria**
 
 - [ ] Independent encoder and decoder implementations can exchange golden vectors.
-- [ ] The native transport no longer accepts application-defined raw packets as BUS messages.
-- [ ] The packet ABI has an explicit BUS/1-preview compatibility policy.
+- [x] The native transport no longer accepts application-defined raw packets as BUS messages.
+- [x] The packet ABI has an explicit BUS/1-preview compatibility policy.
 
 ## Phase 2 — Establish authenticated sessions
 

@@ -21,6 +21,7 @@ monitoring = []
 bus-broker = { path = "../bus-broker" }
 bus-client = { path = "../bus-client" }
 bus-policy = { path = "../bus-policy" }
+bus-protocol = { path = "../bus-protocol" }
 bus-transport-unix = { path = "../bus-transport-unix", optional = true }
 
 [lints]
