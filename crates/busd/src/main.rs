@@ -7,8 +7,8 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use bus_broker::{Broker, ClientHello, DeliveryEvent, Error as BrokerError};
-use bus_policy::{AllowAll, Credentials};
+use bus_broker::{Broker, ClientHello, DeliveryEvent, Error as BrokerError, Limits};
+use bus_policy::{AllowAll, ConfigPolicy, Credentials, Policy, SafeDefaults};
 use bus_protocol::{CodecError, Frame, FrameLimits, HeaderValue, ProtocolErrorCode};
 
 #[cfg(feature = "unix")]
@@ -18,12 +18,37 @@ const DEFAULT_SOCKET: &str = "/run/busd/busd.sock";
 
 struct Command {
     socket: PathBuf,
+    policy: PolicySource,
+    limits: Limits,
+    maximum_frame_size: usize,
+}
+
+enum PolicySource {
+    SafeDefaults,
+    File(PathBuf),
+    UnsafeAllowAll,
+}
+
+enum DaemonPolicy {
+    SafeDefaults(SafeDefaults),
+    File(ConfigPolicy),
+    UnsafeAllowAll(AllowAll),
+}
+
+impl Policy for DaemonPolicy {
+    fn permits(&self, request: &bus_policy::Request<'_>) -> bool {
+        match self {
+            Self::SafeDefaults(policy) => policy.permits(request),
+            Self::File(policy) => policy.permits(request),
+            Self::UnsafeAllowAll(policy) => policy.permits(request),
+        }
+    }
 }
 
 #[cfg(feature = "unix")]
 fn main() -> io::Result<()> {
     let command = parse_command(env::args_os().skip(1))?;
-    run_daemon(command.socket)
+    run_daemon(command)
 }
 
 #[cfg(not(feature = "unix"))]
@@ -47,25 +72,84 @@ fn parse_command(arguments: impl Iterator<Item = OsString>) -> io::Result<Comman
     }
 
     let mut socket = PathBuf::from(DEFAULT_SOCKET);
+    let mut policy = PolicySource::SafeDefaults;
+    let mut limits = Limits::default();
+    let mut maximum_frame_size = FrameLimits::default().maximum_frame_size;
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("--socket") => socket = arguments.next().ok_or_else(usage)?.into(),
+            Some("--policy") => {
+                if matches!(policy, PolicySource::UnsafeAllowAll) {
+                    return Err(usage());
+                }
+                policy = PolicySource::File(arguments.next().ok_or_else(usage)?.into());
+            }
+            Some("--unsafe-allow-all") => {
+                if matches!(policy, PolicySource::File(_)) {
+                    return Err(usage());
+                }
+                policy = PolicySource::UnsafeAllowAll;
+            }
+            Some("--maximum-frame-size") => {
+                maximum_frame_size = parse_limit(arguments.next().ok_or_else(usage)?)?;
+            }
+            Some("--maximum-queued-bytes") => {
+                limits.maximum_queued_bytes = parse_limit(arguments.next().ok_or_else(usage)?)?;
+            }
+            Some("--maximum-queued-messages") => {
+                limits.maximum_queued_messages = parse_limit(arguments.next().ok_or_else(usage)?)?;
+            }
+            Some("--maximum-in-flight-requests") => {
+                limits.maximum_in_flight_requests =
+                    parse_limit(arguments.next().ok_or_else(usage)?)?;
+            }
+            Some("--maximum-subscriptions") => {
+                limits.maximum_subscriptions = parse_limit(arguments.next().ok_or_else(usage)?)?;
+            }
+            Some("--maximum-namespace-claims") => {
+                limits.maximum_namespace_claims = parse_limit(arguments.next().ok_or_else(usage)?)?;
+            }
             _ => return Err(usage()),
         }
     }
-    Ok(Command { socket })
+    Ok(Command {
+        socket,
+        policy,
+        limits,
+        maximum_frame_size,
+    })
+}
+
+fn parse_limit(value: OsString) -> io::Result<usize> {
+    let value = value.into_string().map_err(|_| usage())?;
+    let value = value.parse().map_err(|_| usage())?;
+    if value == 0 {
+        return Err(usage());
+    }
+    Ok(value)
 }
 
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: busd daemon [--socket PATH]",
+        "usage: busd daemon [--socket PATH] [--policy PATH | --unsafe-allow-all] [--maximum-frame-size BYTES] [--maximum-queued-bytes BYTES] [--maximum-queued-messages COUNT] [--maximum-in-flight-requests COUNT] [--maximum-subscriptions COUNT] [--maximum-namespace-claims COUNT]",
     )
 }
 
 #[cfg(feature = "unix")]
-fn run_daemon(socket: PathBuf) -> io::Result<()> {
-    let broker = Arc::new(Mutex::new(Broker::new(AllowAll)));
+fn run_daemon(command: Command) -> io::Result<()> {
+    let policy = match command.policy {
+        PolicySource::SafeDefaults => DaemonPolicy::SafeDefaults(SafeDefaults),
+        PolicySource::File(path) => DaemonPolicy::File(
+            ConfigPolicy::parse(&std::fs::read_to_string(path)?).map_err(io::Error::other)?,
+        ),
+        PolicySource::UnsafeAllowAll => DaemonPolicy::UnsafeAllowAll(AllowAll),
+    };
+    let limits = FrameLimits {
+        maximum_frame_size: command.maximum_frame_size,
+        ..FrameLimits::default()
+    };
+    let broker = Arc::new(Mutex::new(Broker::with_limits(policy, command.limits)));
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let scheduler_broker = Arc::clone(&broker);
     let scheduler_sessions = Arc::clone(&sessions);
@@ -76,17 +160,17 @@ fn run_daemon(socket: PathBuf) -> io::Result<()> {
                 Ok(mut broker) => broker.tick(now_ms()),
                 Err(_) => return,
             };
-            let _ = dispatch_delivery_events(&scheduler_sessions, events, FrameLimits::default());
+            let _ = dispatch_delivery_events(&scheduler_sessions, events, limits);
         }
     });
-    let listener = Listener::bind(&socket)?;
+    let listener = Listener::bind(&command.socket)?;
     eprintln!("busd: listening on {}", listener.path().display());
     loop {
         let peer = listener.accept()?;
         let broker = Arc::clone(&broker);
         let sessions = Arc::clone(&sessions);
         std::thread::spawn(move || {
-            if let Err(error) = serve_peer(peer, broker, sessions) {
+            if let Err(error) = serve_peer(peer, broker, sessions, limits) {
                 eprintln!("busd: protocol peer failed: {error}");
             }
         });
@@ -94,13 +178,13 @@ fn run_daemon(socket: PathBuf) -> io::Result<()> {
 }
 
 #[cfg(feature = "unix")]
-fn serve_peer(
+fn serve_peer<P: Policy>(
     peer: Connection,
-    broker: Arc<Mutex<Broker<AllowAll>>>,
+    broker: Arc<Mutex<Broker<P>>>,
     sessions: Arc<Mutex<BTreeMap<bus_protocol::PeerId, Connection>>>,
+    limits: FrameLimits,
 ) -> io::Result<()> {
-    let limits = FrameLimits::default();
-    let credentials = peer.peer_credentials()?;
+    let credentials = credentials_from_peer(peer.peer_credentials()?);
     let Some(packet) = peer.receive_packet(limits.maximum_frame_size)? else {
         return Ok(());
     };
@@ -123,15 +207,11 @@ fn serve_peer(
         }
         Err(error) => return reject(&peer, codec_error_code(&error), &error.to_string()),
     };
-    let session = match broker.lock().map_err(lock_error)?.connect_session(
-        Credentials {
-            pid: credentials.pid,
-            uid: credentials.uid,
-            gid: credentials.gid,
-            ..Credentials::default()
-        },
-        hello,
-    ) {
+    let session = match broker
+        .lock()
+        .map_err(lock_error)?
+        .connect_session(credentials.clone(), hello)
+    {
         Ok(session) => session,
         Err(error) => return reject(&peer, ProtocolErrorCode::InvalidState, &error.to_string()),
     };
@@ -143,6 +223,10 @@ fn serve_peer(
         .encode_with_limits(limits)
         .map_err(codec_io_error)?,
     )?;
+    eprintln!(
+        "busd event=peer_connected peer={} pid={} uid={} gid={}",
+        session.id, credentials.pid, credentials.uid, credentials.gid
+    );
     sessions
         .lock()
         .map_err(lock_error)?
@@ -167,10 +251,10 @@ fn serve_peer(
 }
 
 #[cfg(feature = "unix")]
-fn dispatch_session(
+fn dispatch_session<P: Policy>(
     peer: &Connection,
     peer_id: bus_protocol::PeerId,
-    broker: &Arc<Mutex<Broker<AllowAll>>>,
+    broker: &Arc<Mutex<Broker<P>>>,
     sessions: &Arc<Mutex<BTreeMap<bus_protocol::PeerId, Connection>>>,
     limits: FrameLimits,
 ) -> io::Result<()> {
@@ -366,6 +450,36 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(feature = "unix")]
+fn credentials_from_peer(peer: bus_transport_unix::PeerCredentials) -> Credentials {
+    let root = PathBuf::from("/proc").join(peer.pid.to_string());
+    let executable = std::fs::read_link(root.join("exe"))
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
+    let security_label = std::fs::read_to_string(root.join("attr/current"))
+        .ok()
+        .map(|value| value.trim().into())
+        .filter(|value: &String| !value.is_empty());
+    let cgroup = std::fs::read_to_string(root.join("cgroup"))
+        .ok()
+        .and_then(|value| {
+            value
+                .lines()
+                .next()
+                .and_then(|line| line.splitn(3, ':').nth(2))
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        });
+    Credentials {
+        pid: peer.pid,
+        uid: peer.uid,
+        gid: peer.gid,
+        executable,
+        security_label,
+        cgroup,
+    }
+}
+
+#[cfg(feature = "unix")]
 fn send_control_result(
     peer: &Connection,
     result: Result<(), bus_broker::Error>,
@@ -386,6 +500,7 @@ fn send_control_result(
 fn broker_error_code(error: &BrokerError) -> ProtocolErrorCode {
     match error {
         BrokerError::NoRecipient => ProtocolErrorCode::NoRecipient,
+        BrokerError::LimitExceeded(_) => ProtocolErrorCode::LimitExceeded,
         _ => ProtocolErrorCode::InvalidState,
     }
 }
@@ -480,6 +595,7 @@ mod tests {
                 listener.accept().unwrap(),
                 server_broker,
                 Arc::new(Mutex::new(BTreeMap::new())),
+                FrameLimits::default(),
             )
         });
         let connection = Connection::connect(&path).unwrap();
@@ -543,6 +659,7 @@ mod tests {
                 listener.accept().unwrap(),
                 broker,
                 Arc::new(Mutex::new(BTreeMap::new())),
+                FrameLimits::default(),
             )
         });
         let connection = Connection::connect(&path).unwrap();

@@ -48,6 +48,7 @@ pub struct ConnectedPeer {
 /// In-memory state for one broker instance.
 pub struct Broker<P> {
     policy: P,
+    limits: Limits,
     capabilities: Capabilities,
     next_peer: u64,
     peers: BTreeMap<PeerId, Peer>,
@@ -55,6 +56,48 @@ pub struct Broker<P> {
     subscriptions: BTreeMap<Channel, BTreeMap<PeerId, Vec<HeaderFilter>>>,
     deliveries: BTreeMap<MessageId, PendingDelivery>,
     events: Vec<LifecycleEvent>,
+}
+
+/// Per-peer resource limits enforced by the broker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Limits {
+    /// Maximum retained reliable-delivery bytes per sender.
+    pub maximum_queued_bytes: usize,
+    /// Maximum retained reliable deliveries per sender.
+    pub maximum_queued_messages: usize,
+    /// Maximum in-flight requests per sender.
+    pub maximum_in_flight_requests: usize,
+    /// Maximum channel subscriptions per peer.
+    pub maximum_subscriptions: usize,
+    /// Maximum namespace claims per peer.
+    pub maximum_namespace_claims: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            maximum_queued_bytes: 4 * 1_024 * 1_024,
+            maximum_queued_messages: 1_024,
+            maximum_in_flight_requests: 128,
+            maximum_subscriptions: 256,
+            maximum_namespace_claims: 64,
+        }
+    }
+}
+
+/// A named broker limit that an operation exceeded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Limit {
+    /// Retained reliable-delivery bytes.
+    QueuedBytes,
+    /// Retained reliable-delivery count.
+    QueuedMessages,
+    /// Request delivery count.
+    InFlightRequests,
+    /// Subscription count.
+    Subscriptions,
+    /// Namespace claim count.
+    NamespaceClaims,
 }
 
 struct PendingDelivery {
@@ -96,8 +139,15 @@ impl<P: Policy> Broker<P> {
     /// Creates an empty broker using `policy` for authorization decisions.
     #[must_use]
     pub fn new(policy: P) -> Self {
+        Self::with_limits(policy, Limits::default())
+    }
+
+    /// Creates an empty broker with explicit per-peer resource limits.
+    #[must_use]
+    pub fn with_limits(policy: P, limits: Limits) -> Self {
         Self {
             policy,
+            limits,
             capabilities: Capabilities::new(),
             next_peer: 1,
             peers: BTreeMap::new(),
@@ -113,6 +163,7 @@ impl<P: Policy> Broker<P> {
     pub fn with_capabilities(policy: P, capabilities: Capabilities) -> Self {
         Self {
             policy,
+            limits: Limits::default(),
             capabilities,
             next_peer: 1,
             peers: BTreeMap::new(),
@@ -197,6 +248,15 @@ impl<P: Policy> Broker<P> {
     /// Exclusively claims a namespace for a connected peer.
     pub fn claim(&mut self, peer: PeerId, namespace: Namespace) -> Result<(), Error> {
         self.authorize(peer, Action::ClaimNamespace(namespace.clone()))?;
+        if self
+            .namespaces
+            .values()
+            .filter(|owner| **owner == peer)
+            .count()
+            >= self.limits.maximum_namespace_claims
+        {
+            return Err(Error::LimitExceeded(Limit::NamespaceClaims));
+        }
         if let Some(owner) = self.namespaces.get(&namespace) {
             return Err(Error::NamespaceAlreadyOwned {
                 namespace,
@@ -225,6 +285,20 @@ impl<P: Policy> Broker<P> {
         filters: Vec<HeaderFilter>,
     ) -> Result<(), Error> {
         self.authorize(peer, Action::Subscribe(channel.clone()))?;
+        let already_subscribed = self
+            .subscriptions
+            .get(&channel)
+            .is_some_and(|subscribers| subscribers.contains_key(&peer));
+        if !already_subscribed
+            && self
+                .subscriptions
+                .values()
+                .filter(|subscribers| subscribers.contains_key(&peer))
+                .count()
+                >= self.limits.maximum_subscriptions
+        {
+            return Err(Error::LimitExceeded(Limit::Subscriptions));
+        }
         self.subscriptions
             .entry(channel)
             .or_default()
@@ -408,6 +482,7 @@ impl<P: Policy> Broker<P> {
         let tracked = *kind == MessageKind::Request
             || matches!(ack_policy, AckPolicy::Received | AckPolicy::Processed);
         if tracked {
+            self.ensure_delivery_capacity(sender, &message, *kind == MessageKind::Request)?;
             let deadline_ms = now_ms
                 .checked_add(u64::from(*deadline_ms))
                 .ok_or(Error::DeadlineOverflow)?;
@@ -655,6 +730,12 @@ impl<P: Policy> Broker<P> {
         &self.capabilities
     }
 
+    /// Returns the enforced per-peer resource limits.
+    #[must_use]
+    pub const fn limits(&self) -> Limits {
+        self.limits
+    }
+
     /// Drains lifecycle events in generation order.
     pub fn drain_events(&mut self) -> Vec<LifecycleEvent> {
         std::mem::take(&mut self.events)
@@ -665,6 +746,47 @@ impl<P: Policy> Broker<P> {
             .get(&peer)
             .map(|peer| peer.credentials.clone())
             .ok_or(Error::UnknownPeer(peer))
+    }
+
+    fn ensure_delivery_capacity(
+        &self,
+        sender: PeerId,
+        message: &Frame,
+        is_request: bool,
+    ) -> Result<(), Error> {
+        let queued: Vec<_> = self
+            .deliveries
+            .values()
+            .filter(|pending| pending.sender == sender)
+            .collect();
+        if queued.len() >= self.limits.maximum_queued_messages {
+            return Err(Error::LimitExceeded(Limit::QueuedMessages));
+        }
+        let used_bytes: usize = queued
+            .iter()
+            .map(|pending| delivery_bytes(&pending.message))
+            .sum();
+        if used_bytes.saturating_add(delivery_bytes(message)) > self.limits.maximum_queued_bytes {
+            return Err(Error::LimitExceeded(Limit::QueuedBytes));
+        }
+        if is_request
+            && queued
+                .iter()
+                .filter(|pending| {
+                    matches!(
+                        &pending.message,
+                        Frame::Message {
+                            kind: MessageKind::Request,
+                            ..
+                        }
+                    )
+                })
+                .count()
+                >= self.limits.maximum_in_flight_requests
+        {
+            return Err(Error::LimitExceeded(Limit::InFlightRequests));
+        }
+        Ok(())
     }
 
     fn authorize(&self, peer: PeerId, action: Action) -> Result<(), Error> {
@@ -836,6 +958,28 @@ fn retry_next(retry: RetryPolicy, now_ms: u64, attempts: u8) -> Option<u64> {
     Some(now_ms.saturating_add(delay))
 }
 
+fn delivery_bytes(message: &Frame) -> usize {
+    match message {
+        Frame::Message {
+            headers, payload, ..
+        } => payload.len().saturating_add(
+            headers
+                .iter()
+                .map(|(name, value)| {
+                    name.len()
+                        + match value {
+                            HeaderValue::Text(value) => value.len(),
+                            HeaderValue::Unsigned(_) => std::mem::size_of::<u64>(),
+                            HeaderValue::Boolean(_) => 1,
+                            HeaderValue::Binary(value) => value.len(),
+                        }
+                })
+                .sum::<usize>(),
+        ),
+        _ => 0,
+    }
+}
+
 /// A broker operation error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -868,6 +1012,8 @@ pub enum Error {
     UnexpectedResponse(MessageId),
     /// A relative deadline overflowed the broker clock.
     DeadlineOverflow,
+    /// A peer exceeded an enforced resource limit.
+    LimitExceeded(Limit),
 }
 
 impl fmt::Display for Error {
@@ -905,6 +1051,7 @@ impl fmt::Display for Error {
             Self::DeadlineOverflow => {
                 formatter.write_str("message deadline overflowed broker clock")
             }
+            Self::LimitExceeded(limit) => write!(formatter, "broker limit exceeded: {limit:?}"),
         }
     }
 }
@@ -1374,5 +1521,55 @@ mod tests {
                 outcome: DeliveryOutcome::RecipientDisconnected,
             }]
         );
+    }
+
+    #[test]
+    fn limits_isolate_exhausting_peers() {
+        let limits = Limits {
+            maximum_queued_bytes: 2,
+            maximum_queued_messages: 1,
+            maximum_in_flight_requests: 1,
+            maximum_subscriptions: 1,
+            maximum_namespace_claims: 1,
+        };
+        let mut broker = Broker::with_limits(AllowAll, limits);
+        let sender = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let recipient = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let first = Namespace::parse("bus://first").unwrap();
+        broker.claim(sender, first).unwrap();
+        assert_eq!(
+            broker.claim(sender, Namespace::parse("bus://second").unwrap()),
+            Err(Error::LimitExceeded(Limit::NamespaceClaims))
+        );
+        let events = Channel::parse("events").unwrap();
+        broker.subscribe(sender, events).unwrap();
+        assert_eq!(
+            broker.subscribe(sender, Channel::parse("other").unwrap()),
+            Err(Error::LimitExceeded(Limit::Subscriptions))
+        );
+        let message = reliable_message(
+            MessageKind::Request,
+            Destination::Peer(recipient),
+            41,
+            AckPolicy::None,
+            RetryPolicy::None,
+        );
+        broker.begin_delivery(sender, message, 0).unwrap();
+        let next = reliable_message(
+            MessageKind::Request,
+            Destination::Peer(recipient),
+            42,
+            AckPolicy::None,
+            RetryPolicy::None,
+        );
+        assert!(matches!(
+            broker.begin_delivery(sender, next, 0),
+            Err(Error::LimitExceeded(Limit::QueuedMessages))
+        ));
+        assert_eq!(broker.peer(recipient).unwrap().id, recipient);
     }
 }

@@ -5,8 +5,8 @@
 The project is an early BUS/1 implementation. It establishes crate boundaries,
 the BUS/1-preview frame ABI and codec, authenticated native sessions, namespace
 and peer routing, filtered channels, broker discovery, requests, acknowledgements,
-deadlines, and bounded retries. FD passing and production policy configuration
-are not implemented yet.
+deadlines, bounded retries, and versioned native authorization policy. FD passing
+and D-Bus interoperability are not implemented yet.
 
 ## Run
 
@@ -15,6 +15,10 @@ Rust 1.85 or newer is required.
 ```bash
 cargo run -p busd -- daemon --socket /tmp/busd.sock
 ```
+
+The built-in daemon policy permits ordinary local messaging but denies broadcast,
+monitoring, and D-Bus registration. Use `--policy /etc/busd/policy.conf` for a
+production policy; see the [operations guide](docs/operations.md).
 
 The native listener uses `AF_UNIX` with `SOCK_SEQPACKET`. The process intentionally leaves an existing socket path untouched; remove a stale development socket before restarting it.
 

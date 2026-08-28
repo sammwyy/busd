@@ -111,6 +111,28 @@ impl Policy for AllowAll {
     }
 }
 
+impl<T: Policy + ?Sized> Policy for Box<T> {
+    fn permits(&self, request: &Request<'_>) -> bool {
+        (**self).permits(request)
+    }
+}
+
+/// The production-safe policy used when no policy file is configured.
+///
+/// It permits ordinary local messaging while keeping privileged operations
+/// (`broadcast`, monitoring, and D-Bus registration) deny-by-default.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SafeDefaults;
+
+impl Policy for SafeDefaults {
+    fn permits(&self, request: &Request<'_>) -> bool {
+        !matches!(
+            request.action,
+            Action::Broadcast | Action::Monitor | Action::RegisterDbusName(_)
+        )
+    }
+}
+
 /// A policy rule effect.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Effect {

@@ -72,6 +72,22 @@ Malformed frames and packets larger than the configured maximum are rejected
 on the affected connection. A protocol error is returned when possible, then
 the peer is disconnected; the broker keeps serving other sessions.
 
+The daemon applies these per-peer defaults: a 1 MiB packet, 4 MiB of retained
+reliable-delivery data, 1,024 retained reliable deliveries, 128 in-flight
+requests, 256 subscriptions, and 64 namespace claims. Override them at launch:
+
+```text
+busd daemon --socket /run/busd/busd.sock --policy /etc/busd/policy.conf \
+  --maximum-frame-size 262144 --maximum-queued-bytes 1048576 \
+  --maximum-queued-messages 256 --maximum-in-flight-requests 64 \
+  --maximum-subscriptions 128 --maximum-namespace-claims 32
+```
+
+The broker applies authorization before selecting recipients or accepting a
+reliable delivery, so priority or capacity settings cannot grant an otherwise
+denied operation. `--unsafe-allow-all` is available only for explicit local
+development and cannot be combined with `--policy`.
+
 ## Troubleshooting
 
 Use the daemon's structured diagnostics to identify a denied operation by peer
