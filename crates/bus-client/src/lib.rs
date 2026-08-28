@@ -134,6 +134,61 @@ impl Bus {
         Ok(())
     }
 
+    /// Claims `namespace` for this connected peer.
+    pub fn claim(&self, namespace: Namespace) -> Result<(), Error> {
+        self.send_control(
+            Frame::Claim {
+                namespace,
+                headers: Headers::new(),
+            },
+            ControlOperation::Claim,
+        )
+    }
+
+    /// Subscribes this peer to a channel using structural message-header filters.
+    pub fn subscribe(&self, channel: Channel, filters: Vec<HeaderFilter>) -> Result<(), Error> {
+        self.send_control(
+            Frame::Subscribe { channel, filters },
+            ControlOperation::Subscribe,
+        )
+    }
+
+    /// Removes this peer's subscription from a channel.
+    pub fn unsubscribe(&self, channel: Channel) -> Result<(), Error> {
+        self.send_control(
+            Frame::Unsubscribe { channel },
+            ControlOperation::Unsubscribe,
+        )
+    }
+
+    /// Resolves the current owner of `namespace`.
+    pub fn resolve_namespace(&self, namespace: Namespace) -> Result<Option<PeerId>, Error> {
+        self.send_frame(&Frame::ResolveNamespace {
+            namespace: namespace.clone(),
+        })?;
+        match self.receive_frame()? {
+            Some(Frame::NamespaceResolved {
+                namespace: resolved,
+                owner,
+            }) if resolved == namespace => Ok(owner),
+            Some(Frame::ProtocolError { code, message }) => Err(Error::Rejected { code, message }),
+            Some(_) => Err(Error::Handshake(
+                "broker sent an unexpected discovery frame",
+            )),
+            None => Err(Error::Handshake(
+                "broker disconnected during namespace resolution",
+            )),
+        }
+    }
+
+    /// Sends an application message through the broker.
+    pub fn send_message(&self, message: &Frame) -> Result<(), Error> {
+        if !matches!(message, Frame::Message { .. }) {
+            return Err(Error::Handshake("send_message requires a MESSAGE frame"));
+        }
+        self.send_frame(message)
+    }
+
     /// Receives and decodes one BUS/1-preview frame.
     ///
     /// Returns `None` when the broker disconnects.
@@ -151,6 +206,18 @@ impl Bus {
     pub fn disconnect(self) -> Result<(), Error> {
         self.connection.disconnect()?;
         Ok(())
+    }
+
+    fn send_control(&self, frame: Frame, operation: ControlOperation) -> Result<(), Error> {
+        self.send_frame(&frame)?;
+        match self.receive_frame()? {
+            Some(Frame::ControlResult { operation: result }) if result == operation => Ok(()),
+            Some(Frame::ProtocolError { code, message }) => Err(Error::Rejected { code, message }),
+            Some(_) => Err(Error::Handshake("broker sent an unexpected control frame")),
+            None => Err(Error::Handshake(
+                "broker disconnected during a control operation",
+            )),
+        }
     }
 }
 

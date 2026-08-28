@@ -48,6 +48,7 @@ unsafe extern "C" {
         option_length: *mut u32,
     ) -> i32;
     fn shutdown(socket: i32, how: i32) -> i32;
+    fn dup(oldfd: i32) -> i32;
 }
 
 #[cfg(test)]
@@ -192,6 +193,17 @@ impl Connection {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    /// Duplicates this connection for an independent sender handle.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        let fd = unsafe { dup(self.fd.as_raw_fd()) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+        })
     }
 }
 

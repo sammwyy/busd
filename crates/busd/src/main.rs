@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "unix"), allow(dead_code))]
 
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::io;
@@ -65,13 +66,15 @@ fn usage() -> io::Error {
 #[cfg(feature = "unix")]
 fn run_daemon(socket: PathBuf) -> io::Result<()> {
     let broker = Arc::new(Mutex::new(Broker::new(AllowAll)));
+    let sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let listener = Listener::bind(&socket)?;
     eprintln!("busd: listening on {}", listener.path().display());
     loop {
         let peer = listener.accept()?;
         let broker = Arc::clone(&broker);
+        let sessions = Arc::clone(&sessions);
         std::thread::spawn(move || {
-            if let Err(error) = serve_peer(peer, broker) {
+            if let Err(error) = serve_peer(peer, broker, sessions) {
                 eprintln!("busd: protocol peer failed: {error}");
             }
         });
@@ -79,7 +82,11 @@ fn run_daemon(socket: PathBuf) -> io::Result<()> {
 }
 
 #[cfg(feature = "unix")]
-fn serve_peer(peer: Connection, broker: Arc<Mutex<Broker<AllowAll>>>) -> io::Result<()> {
+fn serve_peer(
+    peer: Connection,
+    broker: Arc<Mutex<Broker<AllowAll>>>,
+    sessions: Arc<Mutex<BTreeMap<bus_protocol::PeerId, Connection>>>,
+) -> io::Result<()> {
     let limits = FrameLimits::default();
     let credentials = peer.peer_credentials()?;
     let Some(packet) = peer.receive_packet(limits.maximum_frame_size)? else {
@@ -123,8 +130,13 @@ fn serve_peer(peer: Connection, broker: Arc<Mutex<Broker<AllowAll>>>) -> io::Res
         .encode_with_limits(limits)
         .map_err(codec_io_error)?,
     )?;
+    sessions
+        .lock()
+        .map_err(lock_error)?
+        .insert(session.id, peer.try_clone()?);
 
-    let result = dispatch_session(&peer, session.id, &broker, limits);
+    let result = dispatch_session(&peer, session.id, &broker, &sessions, limits);
+    sessions.lock().map_err(lock_error)?.remove(&session.id);
     let disconnect = broker.lock().map_err(lock_error)?.disconnect(session.id);
     if let Err(error) = disconnect {
         return Err(io::Error::other(error));
@@ -137,16 +149,25 @@ fn dispatch_session(
     peer: &Connection,
     peer_id: bus_protocol::PeerId,
     broker: &Arc<Mutex<Broker<AllowAll>>>,
+    sessions: &Arc<Mutex<BTreeMap<bus_protocol::PeerId, Connection>>>,
     limits: FrameLimits,
 ) -> io::Result<()> {
-    while let Some(packet) = peer.receive_packet(limits.maximum_frame_size)? {
+    loop {
+        let packet = match peer.receive_packet(limits.maximum_frame_size) {
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => break,
+            Err(error) => return Err(error),
+        };
         let frame = match Frame::decode_with_limits(&packet, limits) {
             Ok(frame) => frame,
             Err(error) => return reject(peer, codec_error_code(&error), &error.to_string()),
         };
-        let result = match frame {
+        match frame {
             Frame::Claim { namespace, headers } if headers.is_empty() => {
-                broker.lock().map_err(lock_error)?.claim(peer_id, namespace)
+                let result = broker.lock().map_err(lock_error)?.claim(peer_id, namespace);
+                send_control_result(peer, result, bus_protocol::ControlOperation::Claim, limits)?;
+                continue;
             }
             Frame::Claim { .. } => {
                 return reject(
@@ -155,21 +176,81 @@ fn dispatch_session(
                     "claim metadata is not supported in this phase",
                 );
             }
-            Frame::Subscribe { channel, filters } if filters.is_empty() => broker
-                .lock()
-                .map_err(lock_error)?
-                .subscribe(peer_id, channel),
-            Frame::Subscribe { .. } => {
-                return reject(
+            Frame::Subscribe { channel, filters } => {
+                let result = broker
+                    .lock()
+                    .map_err(lock_error)?
+                    .subscribe_with_filters(peer_id, channel, filters);
+                send_control_result(
                     peer,
-                    ProtocolErrorCode::InvalidState,
-                    "subscription filters are not supported in this phase",
-                );
+                    result,
+                    bus_protocol::ControlOperation::Subscribe,
+                    limits,
+                )?;
+                continue;
             }
-            Frame::Unsubscribe { channel } => broker
-                .lock()
-                .map_err(lock_error)?
-                .unsubscribe(peer_id, &channel),
+            Frame::Unsubscribe { channel } => {
+                let result = broker
+                    .lock()
+                    .map_err(lock_error)?
+                    .unsubscribe(peer_id, &channel);
+                send_control_result(
+                    peer,
+                    result,
+                    bus_protocol::ControlOperation::Unsubscribe,
+                    limits,
+                )?;
+                continue;
+            }
+            Frame::ResolveNamespace { namespace } => {
+                let owner = broker
+                    .lock()
+                    .map_err(lock_error)?
+                    .namespace_owner(&namespace);
+                peer.send_packet(
+                    &Frame::NamespaceResolved { namespace, owner }
+                        .encode_with_limits(limits)
+                        .map_err(codec_io_error)?,
+                )?;
+                continue;
+            }
+            Frame::Message {
+                ref destination,
+                ref headers,
+                ..
+            } => {
+                let recipients =
+                    match broker
+                        .lock()
+                        .map_err(lock_error)?
+                        .route(peer_id, destination, headers)
+                    {
+                        Ok(recipients) => recipients,
+                        Err(error) => {
+                            peer.send_packet(
+                                &Frame::ProtocolError {
+                                    code: ProtocolErrorCode::InvalidState,
+                                    message: error.to_string(),
+                                }
+                                .encode_with_limits(limits)
+                                .map_err(codec_io_error)?,
+                            )?;
+                            continue;
+                        }
+                    };
+                let outputs: Vec<_> = sessions
+                    .lock()
+                    .map_err(lock_error)?
+                    .iter()
+                    .filter(|(id, _)| recipients.contains(id))
+                    .map(|(_, connection)| connection.try_clone())
+                    .collect::<io::Result<_>>()?;
+                let encoded = frame.encode_with_limits(limits).map_err(codec_io_error)?;
+                for connection in outputs {
+                    connection.send_packet(&encoded)?;
+                }
+                continue;
+            }
             Frame::Hello { .. } => {
                 return reject(
                     peer,
@@ -177,7 +258,10 @@ fn dispatch_session(
                     "HELLO was already received",
                 );
             }
-            Frame::Welcome { .. } | Frame::Message { .. } | Frame::ProtocolError { .. } => {
+            Frame::Welcome { .. }
+            | Frame::ProtocolError { .. }
+            | Frame::ControlResult { .. }
+            | Frame::NamespaceResolved { .. } => {
                 return reject(
                     peer,
                     ProtocolErrorCode::InvalidState,
@@ -185,18 +269,25 @@ fn dispatch_session(
                 );
             }
         };
-        if let Err(error) = result {
-            peer.send_packet(
-                &Frame::ProtocolError {
-                    code: ProtocolErrorCode::InvalidState,
-                    message: error.to_string(),
-                }
-                .encode_with_limits(limits)
-                .map_err(codec_io_error)?,
-            )?;
-        }
     }
     Ok(())
+}
+
+#[cfg(feature = "unix")]
+fn send_control_result(
+    peer: &Connection,
+    result: Result<(), bus_broker::Error>,
+    operation: bus_protocol::ControlOperation,
+    limits: FrameLimits,
+) -> io::Result<()> {
+    let frame = match result {
+        Ok(()) => Frame::ControlResult { operation },
+        Err(error) => Frame::ProtocolError {
+            code: ProtocolErrorCode::InvalidState,
+            message: error.to_string(),
+        },
+    };
+    peer.send_packet(&frame.encode_with_limits(limits).map_err(codec_io_error)?)
 }
 
 #[cfg(feature = "unix")]
@@ -284,7 +375,13 @@ mod tests {
         let listener = Listener::bind(&path).unwrap();
         let broker = Arc::new(Mutex::new(Broker::new(AllowAll)));
         let server_broker = Arc::clone(&broker);
-        let server = thread::spawn(move || serve_peer(listener.accept().unwrap(), server_broker));
+        let server = thread::spawn(move || {
+            serve_peer(
+                listener.accept().unwrap(),
+                server_broker,
+                Arc::new(Mutex::new(BTreeMap::new())),
+            )
+        });
         let connection = Connection::connect(&path).unwrap();
         connection
             .send_packet(
@@ -341,7 +438,13 @@ mod tests {
         let path = std::env::temp_dir().join(format!("busd-reject-{}-{nonce}.sock", process::id()));
         let listener = Listener::bind(&path).unwrap();
         let broker = Arc::new(Mutex::new(Broker::new(AllowAll)));
-        let server = thread::spawn(move || serve_peer(listener.accept().unwrap(), broker));
+        let server = thread::spawn(move || {
+            serve_peer(
+                listener.accept().unwrap(),
+                broker,
+                Arc::new(Mutex::new(BTreeMap::new())),
+            )
+        });
         let connection = Connection::connect(&path).unwrap();
         connection
             .send_packet(
