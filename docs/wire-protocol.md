@@ -36,10 +36,10 @@ exactly 16 opaque bytes; the all-zero ID means absent and is the only absent-ID
 representation. `peer-id` is a non-zero `u64`.
 
 `name` is `u16 byte-length` followed by 1 to 255 visible ASCII bytes other than
-`/` and whitespace. A namespace is encoded as a `name` whose text includes the
-literal `bus:` prefix and whose value passes the namespace validation rule
-(`bus://` followed by a name). A text value is `u16 byte-length` followed by
-valid UTF-8. Binary data is `u32 byte-length` followed by bytes.
+`/` and whitespace. A namespace uses the same `u16 byte-length` representation,
+but is validated as literal `bus://` followed by a name. A text value is `u16
+byte-length` followed by valid UTF-8. Binary data is `u32 byte-length` followed
+by bytes.
 
 Header values are encoded as:
 
