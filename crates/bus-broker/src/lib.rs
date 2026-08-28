@@ -256,7 +256,7 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bus_policy::AllowAll;
+    use bus_policy::{AllowAll, Policy};
 
     fn credentials() -> Credentials {
         Credentials {
@@ -301,6 +301,10 @@ mod tests {
         broker.subscribe(first, channel.clone()).unwrap();
         broker.subscribe(second, channel.clone()).unwrap();
         assert_eq!(broker.subscribers(&channel), vec![first, second]);
+        broker.disconnect(first).unwrap();
+        assert_eq!(broker.subscribers(&channel), vec![second]);
+        broker.disconnect(second).unwrap();
+        assert!(broker.subscribers(&channel).is_empty());
     }
 
     #[test]
@@ -326,5 +330,26 @@ mod tests {
             },
         );
         assert!(matches!(error, Err(Error::ReservedHeader(header)) if header == "peer.uid"));
+    }
+
+    #[test]
+    fn policy_uses_authenticated_credentials_not_claimed_headers() {
+        struct RootOnly;
+
+        impl Policy for RootOnly {
+            fn permits(&self, credentials: Credentials, _: &Action) -> bool {
+                credentials.uid == 0
+            }
+        }
+
+        let mut broker = Broker::new(RootOnly);
+        let result = broker.connect(
+            credentials(),
+            ClientHello {
+                headers: [("client.uid".into(), bus_protocol::HeaderValue::Unsigned(0))].into(),
+                ..ClientHello::default()
+            },
+        );
+        assert!(matches!(result, Err(Error::Denied(Action::Connect))));
     }
 }

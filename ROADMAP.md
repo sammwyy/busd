@@ -67,22 +67,22 @@ layers. Checkboxes record repository status, not an estimated schedule.
 
 **Milestone:** M2 — Native broker alpha.
 
-- [ ] Obtain authenticated peer credentials (`PID`, `UID`, and `GID`) from the
+- [x] Obtain authenticated peer credentials (`PID`, `UID`, and `GID`) from the
   Unix socket and attach them as broker-owned metadata.
-- [ ] Implement the `HELLO`/`WELCOME` handshake, peer ID assignment, claimed
+- [x] Implement the `HELLO`/`WELCOME` handshake, peer ID assignment, claimed
   headers, and capability negotiation.
-- [ ] Validate all claimed metadata and ensure clients cannot forge broker headers.
-- [ ] Connect accepted transport sessions to `bus-broker` peer lifecycle state.
-- [ ] Release namespaces and subscriptions automatically on disconnect.
-- [ ] Add structured protocol-error responses and disconnect rules for invalid peers.
-- [ ] Replace the daemon's debug receive loop with a session dispatcher.
-- [ ] Expose typed `Bus::connect`, handshake, and orderly disconnect behavior in `bus-client`.
+- [x] Validate all claimed metadata and ensure clients cannot forge broker headers.
+- [x] Connect accepted transport sessions to `bus-broker` peer lifecycle state.
+- [x] Release namespaces and subscriptions automatically on disconnect.
+- [x] Add structured protocol-error responses and disconnect rules for invalid peers.
+- [x] Replace the daemon's debug receive loop with a session dispatcher.
+- [x] Expose typed `Bus::connect`, handshake, and orderly disconnect behavior in `bus-client`.
 
 **Exit criteria**
 
-- [ ] Two native clients can handshake concurrently and observe distinct ephemeral peer IDs.
-- [ ] A disconnected provider's namespace becomes claimable without manual cleanup.
-- [ ] Credential-derived policy decisions never rely on client-claimed identity.
+- [x] Two native clients can handshake concurrently and observe distinct ephemeral peer IDs.
+- [x] A disconnected provider's namespace becomes claimable without manual cleanup.
+- [x] Credential-derived policy decisions never rely on client-claimed identity.
 
 ## Phase 3 — Implement routing and discovery
 

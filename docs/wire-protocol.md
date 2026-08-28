@@ -80,6 +80,25 @@ namespace then headers. `SUBSCRIBE` and `UNSUBSCRIBE` operate on an unowned
 channel. A peer may send `HELLO` only once before normal frames; session-state
 rules and authorization are enforced by the broker, not by this codec.
 
+## Native session rules
+
+On Linux, the broker obtains `PID`, `UID`, and `GID` with `SO_PEERCRED` from the
+accepted Unix socket. These values are broker-owned metadata; a `HELLO` header
+cannot set or replace them. Header names beginning with `auth.`, `broker.`, or
+`peer.` are reserved and cause handshake rejection.
+
+The first frame from a client must be `HELLO`. A broker that accepts it assigns
+a non-zero peer ID, intersects the offered capabilities with its own supported
+capabilities, records the claimed metadata separately from authenticated
+credentials, and replies with `WELCOME`. The client may begin normal control
+traffic only after receiving `WELCOME`.
+
+An invalid first frame, duplicate `HELLO`, malformed frame, or frame that is
+not valid for the current session produces a `PROTOCOL_ERROR` and closes the
+connection. Rejected claim or subscription operations produce a structured
+`PROTOCOL_ERROR` while leaving an otherwise valid session connected. Closing a
+native connection releases its peer, namespace claims, and subscriptions.
+
 ## Message envelope
 
 `MESSAGE` bodies have this exact order:

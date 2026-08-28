@@ -3,8 +3,8 @@
 `busd` is a generic local message broker for Linux IPC. It routes opaque binary payloads; applications own payload semantics.
 
 The project is an early BUS/1 implementation. It establishes crate boundaries,
-the BUS/1-preview frame ABI and codec, and core broker invariants. Session
-handling, routing execution, FD passing, acknowledgement tracking, and
+the BUS/1-preview frame ABI and codec, authenticated native sessions, and core
+broker invariants. Routing execution, FD passing, acknowledgement tracking, and
 production policy configuration are not implemented yet.
 
 ## Run
@@ -25,9 +25,8 @@ The default socket is `/run/busd/busd.sock`; its parent directory must be manage
 
 ## Client status
 
-`busd` currently exposes no supported interactive client. Use the
-`bus-protocol` codec to produce valid BUS/1-preview frames while Phase 2 adds
-typed session operations.
+`bus-client` opens an authenticated native session, performs `HELLO`/`WELCOME`,
+and exposes the broker-assigned peer ID. Message routing APIs begin in Phase 3.
 
 See the [BUS/1-preview wire protocol](docs/wire-protocol.md) for the packet ABI.
 
@@ -54,6 +53,8 @@ Applications should depend on `bus-client`, not the transport crate directly:
 use bus_client::{Bus, ConnectOptions};
 
 let bus = Bus::connect(ConnectOptions::new("/run/busd/busd.sock"))?;
+println!("connected as {}", bus.peer_id());
+bus.disconnect()?;
 ```
 
 ## License
