@@ -11,7 +11,7 @@ layers. Checkboxes record repository status, not an estimated schedule.
   `AF_UNIX`/`SOCK_SEQPACKET` primitives.
 - [x] **M1 — Wire protocol preview:** a documented, versioned BUS/1 packet ABI
   and a round-trippable codec.
-- [ ] **M2 — Native broker alpha:** authenticated connections, handshake, and
+- [x] **M2 — Native broker alpha:** authenticated connections, handshake, and
   live namespace, peer, and channel routing.
 - [ ] **M3 — Reliable messaging beta:** requests, responses, acknowledgements,
   deadlines, and explicit failure results.
@@ -88,25 +88,25 @@ layers. Checkboxes record repository status, not an estimated schedule.
 
 **Milestone:** M2 — Native broker alpha.
 
-- [ ] Implement namespace routing to exactly one current provider.
-- [ ] Implement direct peer routing and response correlation.
-- [ ] Implement channel publication to explicit subscribers only.
-- [ ] Implement client-ID selection (`FIRST`, `ANY`, and `ALL`) with documented
+- [x] Implement namespace routing to exactly one current provider.
+- [x] Implement direct peer routing and response correlation.
+- [x] Implement channel publication to explicit subscribers only.
+- [x] Implement client-ID selection (`FIRST`, `ANY`, and `ALL`) with documented
   behavior when no peer matches.
-- [ ] Implement initial structural header filters: `EXISTS`, `NOT_EXISTS`,
+- [x] Implement initial structural header filters: `EXISTS`, `NOT_EXISTS`,
   `EQUAL`, `NOT_EQUAL`, and `PREFIX`.
-- [ ] Implement controlled global broadcast; keep it disabled unless policy allows it.
-- [ ] Add discovery operations for peers, namespaces, subscriptions, and broker capabilities.
-- [ ] Emit lifecycle events for peer connection, disconnection, namespace acquisition,
+- [x] Implement controlled global broadcast; keep it disabled unless policy allows it.
+- [x] Add discovery operations for peers, namespaces, subscriptions, and broker capabilities.
+- [x] Emit lifecycle events for peer connection, disconnection, namespace acquisition,
   release, and ownership change.
-- [ ] Test routing cardinality, filter matching, cleanup, and all no-recipient paths.
+- [x] Test routing cardinality, filter matching, cleanup, and all no-recipient paths.
 
 **Exit criteria**
 
-- [ ] A client can claim a namespace, another client can resolve it, and a typed
+- [x] A client can claim a namespace, another client can resolve it, and a typed
   message reaches only its provider.
-- [ ] Channel subscribers receive matching messages while unrelated peers receive none.
-- [ ] Discovery output clearly distinguishes claimed metadata from authenticated metadata.
+- [x] Channel subscribers receive matching messages while unrelated peers receive none.
+- [x] Discovery output clearly distinguishes claimed metadata from authenticated metadata.
 
 ## Phase 4 — Requests, acknowledgements, and reliability
 

@@ -7,7 +7,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use bus_broker::{Broker, ClientHello};
+use bus_broker::{Broker, ClientHello, Error as BrokerError};
 use bus_policy::{AllowAll, Credentials};
 use bus_protocol::{CodecError, Frame, FrameLimits, ProtocolErrorCode};
 
@@ -229,7 +229,7 @@ fn dispatch_session(
                         Err(error) => {
                             peer.send_packet(
                                 &Frame::ProtocolError {
-                                    code: ProtocolErrorCode::InvalidState,
+                                    code: broker_error_code(&error),
                                     message: error.to_string(),
                                 }
                                 .encode_with_limits(limits)
@@ -288,6 +288,14 @@ fn send_control_result(
         },
     };
     peer.send_packet(&frame.encode_with_limits(limits).map_err(codec_io_error)?)
+}
+
+#[cfg(feature = "unix")]
+fn broker_error_code(error: &BrokerError) -> ProtocolErrorCode {
+    match error {
+        BrokerError::NoRecipient => ProtocolErrorCode::NoRecipient,
+        _ => ProtocolErrorCode::InvalidState,
+    }
 }
 
 #[cfg(feature = "unix")]

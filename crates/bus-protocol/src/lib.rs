@@ -305,6 +305,8 @@ pub enum ProtocolErrorCode {
     NonCanonical,
     /// The frame is invalid in the current session state.
     InvalidState,
+    /// No eligible peer matched a unicast route.
+    NoRecipient,
 }
 
 /// A complete BUS/1-preview frame.
@@ -1153,6 +1155,7 @@ fn protocol_error_code_tag(value: ProtocolErrorCode) -> u8 {
         ProtocolErrorCode::LimitExceeded => 3,
         ProtocolErrorCode::NonCanonical => 4,
         ProtocolErrorCode::InvalidState => 5,
+        ProtocolErrorCode::NoRecipient => 6,
     }
 }
 fn client_selection_tag(value: ClientSelection) -> u8 {
@@ -1205,6 +1208,7 @@ fn decode_protocol_error_code(value: u8) -> Result<ProtocolErrorCode, CodecError
         3 => Ok(ProtocolErrorCode::LimitExceeded),
         4 => Ok(ProtocolErrorCode::NonCanonical),
         5 => Ok(ProtocolErrorCode::InvalidState),
+        6 => Ok(ProtocolErrorCode::NoRecipient),
         _ => Err(CodecError::InvalidValue("protocol error code")),
     }
 }
@@ -1403,6 +1407,16 @@ mod tests {
                 code: ProtocolErrorCode::InvalidState,
                 message: "HELLO already received".into(),
             },
+            Frame::ControlResult {
+                operation: ControlOperation::Claim,
+            },
+            Frame::ResolveNamespace {
+                namespace: Namespace::parse("bus://service").unwrap(),
+            },
+            Frame::NamespaceResolved {
+                namespace: Namespace::parse("bus://service").unwrap(),
+                owner: Some(PeerId::new(3)),
+            },
         ];
         let encoder = Encoder::default();
         let decoder = Decoder::default();
@@ -1412,6 +1426,39 @@ mod tests {
                 frame
             );
         }
+    }
+
+    #[test]
+    fn client_id_destination_round_trips() {
+        let frame = Frame::Message {
+            kind: MessageKind::Signal,
+            ack_policy: AckPolicy::None,
+            destination: Destination::ClientId {
+                client_id: ClientId::parse("worker").unwrap(),
+                selection: ClientSelection::All,
+            },
+            message_id: message_id(8),
+            correlation_id: MessageId::absent(),
+            status: Status::Success,
+            headers: Headers::new(),
+            payload: Vec::new(),
+        };
+        assert_eq!(Frame::decode(&frame.encode().unwrap()).unwrap(), frame);
+    }
+
+    #[test]
+    fn direct_response_preserves_correlation_id() {
+        let frame = Frame::Message {
+            kind: MessageKind::Response,
+            ack_policy: AckPolicy::None,
+            destination: Destination::Peer(PeerId::new(4)),
+            message_id: message_id(9),
+            correlation_id: message_id(3),
+            status: Status::Success,
+            headers: Headers::new(),
+            payload: Vec::new(),
+        };
+        assert_eq!(Frame::decode(&frame.encode().unwrap()).unwrap(), frame);
     }
     #[test]
     fn arbitrary_input_never_panics() {

@@ -18,7 +18,7 @@ starts with this 12-byte header:
 | Offset | Size | Field | Value |
 | --- | ---: | --- | --- |
 | 0 | 4 | magic | ASCII `BUS1` (`42 55 53 31`) |
-| 4 | 1 | version | `1` for BUS/1-preview |
+| 4 | 1 | version | `2` for BUS/1-preview |
 | 5 | 1 | kind | Frame kind below |
 | 6 | 2 | flags | Must be zero |
 | 8 | 4 | body length | Exact number of following bytes |
@@ -73,6 +73,9 @@ increasing by their complete binary encoding and are limited to 64.
 | 5 | `UNSUBSCRIBE` | channel |
 | 6 | `MESSAGE` | message envelope |
 | 7 | `PROTOCOL_ERROR` | protocol error code and text |
+| 8 | `CONTROL_RESULT` | accepted control-operation tag |
+| 9 | `RESOLVE_NAMESPACE` | namespace |
+| 10 | `NAMESPACE_RESOLVED` | namespace and optional owner peer ID |
 
 `HELLO` starts with one byte (`0` no client ID, `1` name follows), then headers
 and capabilities. `WELCOME` is `peer-id` then capabilities. `CLAIM` is a
@@ -115,7 +118,12 @@ native connection releases its peer, namespace claims, and subscriptions.
 | payload | binary data |
 
 Destination selectors are `0 BROKER`, `1 PEER` plus `peer-id`, `2 NAMESPACE`
-plus namespace, `3 CHANNEL` plus channel, and `4 BROADCAST`. `SIGNAL` and
+plus namespace, `3 CHANNEL` plus channel, `4 BROADCAST`, and `5 CLIENT_ID`
+plus client ID and a selection byte (`0 FIRST`, `1 ANY`, `2 ALL`). `FIRST` and
+preview `ANY` select the lowest matching peer ID; `ALL` selects every matching
+peer. Direct peer, namespace, and client-ID sends return `NO_RECIPIENT` when
+no peer matches. Publishing to an empty channel and broadcasting to no other
+peer succeed with no recipients. `SIGNAL` and
 `REQUEST` must use status `SUCCESS`; a `RESPONSE` may use any status. A response
 must have a non-zero correlation ID. The current statuses are `0 SUCCESS`, `1
 ERROR`, `2 UNSUPPORTED`, `3 DENIED`, `4 BUSY`, and `5 NOT_FOUND`.
@@ -125,13 +133,32 @@ ERROR`, `2 UNSUPPORTED`, `3 DENIED`, `4 BUSY`, and `5 NOT_FOUND`.
 `PROTOCOL_ERROR` is an error-code byte followed by UTF-8 text. Codes are `0
 MALFORMED_FRAME`, `1 UNSUPPORTED_VERSION`, `2 UNKNOWN_FRAME_KIND`, `3
 LIMIT_EXCEEDED`, `4 NON_CANONICAL`, and `5 INVALID_STATE`. Text is diagnostic
-only and must not be parsed for behavior.
+only and must not be parsed for behavior. Version 2 adds `6 NO_RECIPIENT` for
+unicast routing with no matching peer.
 
 All reserved fields and flags are mandatory-zero in this preview. Unknown
 values are rejected, rather than ignored, because no extension point has yet
 been negotiated. Future versions may define optional extensions only through a
 new version or an explicitly negotiated capability; they must preserve these
 validation rules for BUS/1-preview packets.
+
+## Routing control and discovery
+
+The broker replies to accepted `CLAIM`, `SUBSCRIBE`, and `UNSUBSCRIBE` frames
+with `CONTROL_RESULT`; its operation tags are `0 CLAIM`, `1 SUBSCRIBE`, and `2
+UNSUBSCRIBE`. Failed operations use `PROTOCOL_ERROR` and do not disconnect an
+otherwise valid session. `RESOLVE_NAMESPACE` returns `NAMESPACE_RESOLVED` with
+the requested namespace and either marker `0` (unclaimed) or marker `1` plus a
+non-zero owner peer ID.
+
+`MESSAGE` delivery preserves the complete canonical message frame. Namespace
+delivery selects one provider, peer delivery selects one peer, channel delivery
+selects only matching subscribers, client-ID delivery follows its selection
+mode, and broadcast is authorized through the broker policy before selecting
+every other peer. Subscription filters inspect message headers: `PREFIX`
+supports text and binary values; the other structural filters compare canonical
+header values directly. Direct responses retain their message and correlation
+IDs unchanged, allowing the receiving client to associate them with its request.
 
 ## Reference vectors
 

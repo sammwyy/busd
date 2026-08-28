@@ -597,6 +597,9 @@ mod tests {
         let other = broker
             .connect(credentials(), ClientHello::default())
             .unwrap();
+        let unrelated = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
         let namespace = Namespace::parse("bus://service").unwrap();
         let channel = Channel::parse("events").unwrap();
         broker.claim(provider, namespace.clone()).unwrap();
@@ -626,13 +629,142 @@ mod tests {
         );
         assert_eq!(
             broker
-                .route(sender, &Destination::Channel(channel), &headers)
+                .route(sender, &Destination::Channel(channel.clone()), &headers)
                 .unwrap(),
             vec![matching, other]
+        );
+        assert!(
+            !broker
+                .route(sender, &Destination::Channel(channel.clone()), &headers)
+                .unwrap()
+                .contains(&unrelated)
         );
         assert!(matches!(
             broker.route(sender, &Destination::Peer(PeerId::new(99)), &headers),
             Err(Error::NoRecipient)
         ));
+    }
+
+    #[test]
+    fn client_selection_and_broadcast_policy_are_explicit() {
+        let mut broker = Broker::new(AllowAll);
+        let sender = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let first = broker
+            .connect(
+                credentials(),
+                ClientHello {
+                    client_id: Some(ClientId::parse("worker").unwrap()),
+                    ..ClientHello::default()
+                },
+            )
+            .unwrap();
+        let second = broker
+            .connect(
+                credentials(),
+                ClientHello {
+                    client_id: Some(ClientId::parse("worker").unwrap()),
+                    ..ClientHello::default()
+                },
+            )
+            .unwrap();
+        let destination = |selection| Destination::ClientId {
+            client_id: ClientId::parse("worker").unwrap(),
+            selection,
+        };
+        assert_eq!(
+            broker
+                .route(
+                    sender,
+                    &destination(ClientSelection::First),
+                    &Headers::new()
+                )
+                .unwrap(),
+            vec![first]
+        );
+        assert_eq!(
+            broker
+                .route(sender, &destination(ClientSelection::Any), &Headers::new())
+                .unwrap(),
+            vec![first]
+        );
+        assert_eq!(
+            broker
+                .route(sender, &destination(ClientSelection::All), &Headers::new())
+                .unwrap(),
+            vec![first, second]
+        );
+        assert_eq!(
+            broker
+                .route(sender, &Destination::Broadcast, &Headers::new())
+                .unwrap(),
+            vec![first, second]
+        );
+
+        struct NoBroadcast;
+        impl Policy for NoBroadcast {
+            fn permits(&self, _: Credentials, action: &Action) -> bool {
+                !matches!(action, Action::Broadcast)
+            }
+        }
+        let mut restricted = Broker::new(NoBroadcast);
+        let peer = restricted
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        assert!(matches!(
+            restricted.route(peer, &Destination::Broadcast, &Headers::new()),
+            Err(Error::Denied(Action::Broadcast))
+        ));
+    }
+
+    #[test]
+    fn structural_filters_and_discovery_preserve_metadata_provenance() {
+        let headers: Headers = [
+            (
+                "binary".into(),
+                HeaderValue::Binary(b"prefix-value".to_vec()),
+            ),
+            ("enabled".into(), HeaderValue::Boolean(true)),
+            ("text".into(), HeaderValue::Text("prefix-value".into())),
+        ]
+        .into();
+        assert!(filters_match(
+            &[
+                HeaderFilter::Exists("enabled".into()),
+                HeaderFilter::NotExists("missing".into()),
+                HeaderFilter::Equal("enabled".into(), HeaderValue::Boolean(true)),
+                HeaderFilter::NotEqual("enabled".into(), HeaderValue::Boolean(false)),
+                HeaderFilter::Prefix("text".into(), HeaderValue::Text("prefix".into())),
+                HeaderFilter::Prefix("binary".into(), HeaderValue::Binary(b"prefix".to_vec())),
+            ],
+            &headers
+        ));
+
+        let mut broker = Broker::with_capabilities(AllowAll, ["capability".into()].into());
+        let peer = broker
+            .connect(
+                credentials(),
+                ClientHello {
+                    client_id: Some(ClientId::parse("client").unwrap()),
+                    headers: [("client.version".into(), HeaderValue::Text("1".into()))].into(),
+                    capabilities: ["capability".into()].into(),
+                },
+            )
+            .unwrap();
+        let info = broker.peers().pop().unwrap();
+        assert_eq!(info.id, peer);
+        assert_eq!(
+            info.claimed_headers.get("client.version"),
+            Some(&HeaderValue::Text("1".into()))
+        );
+        assert_eq!(info.credentials, credentials());
+        assert_eq!(
+            broker.capabilities(),
+            &Capabilities::from(["capability".into()])
+        );
+        assert!(
+            matches!(broker.drain_events().as_slice(), [LifecycleEvent::PeerConnected { peer: id }] if *id == peer)
+        );
     }
 }
