@@ -165,6 +165,10 @@ impl<P: Policy> Broker<P> {
 
     /// Removes a peer and releases all state owned by that connection.
     pub fn disconnect(&mut self, peer: PeerId) -> Result<(), Error> {
+        self.disconnect_with_events(peer).map(|_| ())
+    }
+
+    fn remove_peer(&mut self, peer: PeerId) -> Result<(), Error> {
         if self.peers.remove(&peer).is_none() {
             return Err(Error::UnknownPeer(peer));
         }
@@ -542,7 +546,7 @@ impl<P: Policy> Broker<P> {
 
     /// Removes a peer and returns any reliability outcomes caused by that disconnect.
     pub fn disconnect_with_events(&mut self, peer: PeerId) -> Result<Vec<DeliveryEvent>, Error> {
-        self.disconnect(peer)?;
+        self.remove_peer(peer)?;
         let affected: Vec<_> = self
             .deliveries
             .iter()
