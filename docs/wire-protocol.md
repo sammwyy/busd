@@ -55,7 +55,8 @@ strictly increasing bytewise. Duplicate, unsorted, invalid, or over-limit
 header names are invalid. This is the canonical duplicate-header rule: a header
 may occur once only. Header counts are limited to 128.
 
-Capabilities are `u16 count` followed by names, strictly increasing and unique.
+Capabilities are `u16 count` followed by names, strictly increasing and unique;
+the default limit is 128 capabilities.
 Filters are `u16 count` followed by a filter tag and name, plus a header value
 for `EQUAL`, `NOT_EQUAL`, and `PREFIX`. Filter tags are `0 EXISTS`, `1
 NOT_EXISTS`, `2 EQUAL`, `3 NOT_EQUAL`, and `4 PREFIX`. Filters must be strictly

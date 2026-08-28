@@ -9,7 +9,7 @@ layers. Checkboxes record repository status, not an estimated schedule.
 - [x] **M0 — Project scaffold:** crate boundaries, core protocol types, in-memory
   namespace and subscription state, policy boundary, and Linux
   `AF_UNIX`/`SOCK_SEQPACKET` primitives.
-- [ ] **M1 — Wire protocol preview:** a documented, versioned BUS/1 packet ABI
+- [x] **M1 — Wire protocol preview:** a documented, versioned BUS/1 packet ABI
   and a round-trippable codec.
 - [ ] **M2 — Native broker alpha:** authenticated connections, handshake, and
   live namespace, peer, and channel routing.
@@ -59,7 +59,7 @@ layers. Checkboxes record repository status, not an estimated schedule.
 
 **Exit criteria**
 
-- [ ] Independent encoder and decoder implementations can exchange golden vectors.
+- [x] Independent encoder and decoder implementations can exchange golden vectors.
 - [x] The native transport no longer accepts application-defined raw packets as BUS messages.
 - [x] The packet ABI has an explicit BUS/1-preview compatibility policy.
 

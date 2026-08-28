@@ -1208,6 +1208,35 @@ mod tests {
             }),
             Err(CodecError::LimitExceeded("capability count"))
         );
+
+        let packet = Frame::ProtocolError {
+            code: ProtocolErrorCode::MalformedFrame,
+            message: "x".repeat(32),
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(
+            Frame::decode_with_limits(
+                &packet,
+                FrameLimits {
+                    maximum_frame_size: 16,
+                    ..FrameLimits::default()
+                }
+            ),
+            Err(CodecError::FrameTooLarge)
+        );
+    }
+    #[test]
+    fn rejects_truncated_and_malformed_packets() {
+        assert_eq!(Frame::decode(b"BUS1"), Err(CodecError::Truncated));
+        let mut packet = Frame::ProtocolError {
+            code: ProtocolErrorCode::MalformedFrame,
+            message: String::new(),
+        }
+        .encode()
+        .unwrap();
+        packet[0] = 0;
+        assert_eq!(Frame::decode(&packet), Err(CodecError::InvalidMagic));
     }
     #[test]
     fn control_frames_and_header_values_round_trip() {
