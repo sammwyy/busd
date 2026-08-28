@@ -2,7 +2,7 @@
 #![warn(missing_docs)]
 //! Authorization boundaries for BUS/1.
 
-use bus_protocol::{Channel, Namespace, PeerId};
+use bus_protocol::{Channel, ClientId, Namespace, PeerId};
 
 /// Broker-verified operating-system identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +30,8 @@ pub enum Action {
     SendPeer(PeerId),
     /// Send to a namespace provider.
     SendNamespace(Namespace),
+    /// Send to peers selected by a client implementation identifier.
+    SendClient(ClientId),
     /// Send a global broadcast.
     Broadcast,
 }

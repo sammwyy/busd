@@ -7,7 +7,7 @@ use std::fmt;
 use std::str::FromStr;
 
 const MAGIC: [u8; 4] = *b"BUS1";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const HEADER_SIZE: usize = 12;
 const MAX_NAME_LENGTH: usize = 255;
 
@@ -225,8 +225,37 @@ pub enum Destination {
     Namespace(Namespace),
     /// Explicit subscribers of a channel.
     Channel(Channel),
+    /// Peers matching a non-unique client implementation identifier.
+    ClientId {
+        /// Client identifier to match.
+        client_id: ClientId,
+        /// Recipient selection strategy.
+        selection: ClientSelection,
+    },
     /// Every policy-eligible peer.
     Broadcast,
+}
+
+/// Recipient selection for a non-unique client identifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientSelection {
+    /// Delivers to the lowest currently connected matching peer ID.
+    First,
+    /// Delivers to one currently connected matching peer; preview uses the lowest ID.
+    Any,
+    /// Delivers to every currently connected matching peer.
+    All,
+}
+
+/// A control operation acknowledged by the broker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlOperation {
+    /// Namespace claim.
+    Claim,
+    /// Channel subscription.
+    Subscribe,
+    /// Channel unsubscription.
+    Unsubscribe,
 }
 
 /// A structural header filter used by a subscription.
@@ -341,6 +370,23 @@ pub enum Frame {
         code: ProtocolErrorCode,
         /// Non-semantic UTF-8 diagnostic text.
         message: String,
+    },
+    /// Confirms a completed control operation.
+    ControlResult {
+        /// Operation accepted by the broker.
+        operation: ControlOperation,
+    },
+    /// Resolves the current provider of a namespace.
+    ResolveNamespace {
+        /// Namespace to resolve.
+        namespace: Namespace,
+    },
+    /// Returns the current provider of a namespace, if any.
+    NamespaceResolved {
+        /// Resolved namespace.
+        namespace: Namespace,
+        /// Current provider, or `None` when unclaimed.
+        owner: Option<PeerId>,
     },
 }
 
@@ -520,6 +566,9 @@ impl Frame {
             5 => Self::decode_unsubscribe(&mut reader),
             6 => Self::decode_message(&mut reader, limits),
             7 => Self::decode_protocol_error(&mut reader),
+            8 => Self::decode_control_result(&mut reader),
+            9 => Self::decode_resolve_namespace(&mut reader),
+            10 => Self::decode_namespace_resolved(&mut reader),
             kind => return Err(CodecError::UnknownFrameKind(kind)),
         }?;
         if !reader.is_empty() {
@@ -598,6 +647,26 @@ impl Frame {
                 push_text(&mut body, message)?;
                 7
             }
+            Self::ControlResult { operation } => {
+                body.push(control_operation_tag(*operation));
+                8
+            }
+            Self::ResolveNamespace { namespace } => {
+                push_namespace(&mut body, namespace)?;
+                9
+            }
+            Self::NamespaceResolved { namespace, owner } => {
+                push_namespace(&mut body, namespace)?;
+                match owner {
+                    Some(peer_id) if peer_id.get() != 0 => {
+                        body.push(1);
+                        push_u64(&mut body, peer_id.get());
+                    }
+                    Some(_) => return Err(CodecError::InvalidValue("peer ID")),
+                    None => body.push(0),
+                }
+                10
+            }
         };
         Ok((kind, body))
     }
@@ -664,6 +733,31 @@ impl Frame {
             code: decode_protocol_error_code(reader.u8()?)?,
             message: reader.text()?,
         })
+    }
+    fn decode_control_result(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Ok(Self::ControlResult {
+            operation: decode_control_operation(reader.u8()?)?,
+        })
+    }
+    fn decode_resolve_namespace(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Ok(Self::ResolveNamespace {
+            namespace: reader.namespace()?,
+        })
+    }
+    fn decode_namespace_resolved(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let namespace = reader.namespace()?;
+        let owner = match reader.u8()? {
+            0 => None,
+            1 => {
+                let peer_id = PeerId::new(reader.u64()?);
+                if peer_id.get() == 0 {
+                    return Err(CodecError::InvalidValue("peer ID"));
+                }
+                Some(peer_id)
+            }
+            _ => return Err(CodecError::InvalidValue("namespace owner marker")),
+        };
+        Ok(Self::NamespaceResolved { namespace, owner })
     }
 }
 
@@ -828,6 +922,10 @@ impl<'a> Reader<'a> {
                 Channel::parse(self.name()?).map_err(CodecError::InvalidName)?,
             )),
             4 => Ok(Destination::Broadcast),
+            5 => Ok(Destination::ClientId {
+                client_id: ClientId::parse(self.name()?).map_err(CodecError::InvalidName)?,
+                selection: decode_client_selection(self.u8()?)?,
+            }),
             _ => Err(CodecError::InvalidValue("destination selector")),
         }
     }
@@ -990,6 +1088,14 @@ fn push_destination(output: &mut Vec<u8>, destination: &Destination) -> Result<(
             push_name(output, channel.as_str())?
         }
         Destination::Broadcast => output.push(4),
+        Destination::ClientId {
+            client_id,
+            selection,
+        } => {
+            output.push(5);
+            push_name(output, client_id.as_str())?;
+            output.push(client_selection_tag(*selection));
+        }
     }
     Ok(())
 }
@@ -1049,6 +1155,20 @@ fn protocol_error_code_tag(value: ProtocolErrorCode) -> u8 {
         ProtocolErrorCode::InvalidState => 5,
     }
 }
+fn client_selection_tag(value: ClientSelection) -> u8 {
+    match value {
+        ClientSelection::First => 0,
+        ClientSelection::Any => 1,
+        ClientSelection::All => 2,
+    }
+}
+fn control_operation_tag(value: ControlOperation) -> u8 {
+    match value {
+        ControlOperation::Claim => 0,
+        ControlOperation::Subscribe => 1,
+        ControlOperation::Unsubscribe => 2,
+    }
+}
 fn decode_message_kind(value: u8) -> Result<MessageKind, CodecError> {
     match value {
         0 => Ok(MessageKind::Signal),
@@ -1086,6 +1206,22 @@ fn decode_protocol_error_code(value: u8) -> Result<ProtocolErrorCode, CodecError
         4 => Ok(ProtocolErrorCode::NonCanonical),
         5 => Ok(ProtocolErrorCode::InvalidState),
         _ => Err(CodecError::InvalidValue("protocol error code")),
+    }
+}
+fn decode_client_selection(value: u8) -> Result<ClientSelection, CodecError> {
+    match value {
+        0 => Ok(ClientSelection::First),
+        1 => Ok(ClientSelection::Any),
+        2 => Ok(ClientSelection::All),
+        _ => Err(CodecError::InvalidValue("client selection")),
+    }
+}
+fn decode_control_operation(value: u8) -> Result<ControlOperation, CodecError> {
+    match value {
+        0 => Ok(ControlOperation::Claim),
+        1 => Ok(ControlOperation::Subscribe),
+        2 => Ok(ControlOperation::Unsubscribe),
+        _ => Err(CodecError::InvalidValue("control operation")),
     }
 }
 fn validate_name(value: &str) -> Result<(), NameError> {
@@ -1129,7 +1265,7 @@ mod tests {
             capabilities: ["alpha".into()].into(),
         };
         let expected = [
-            0x42, 0x55, 0x53, 0x31, 1, 1, 0, 0, 0, 0, 0, 32, 1, 0, 3, b'a', b'p', b'p', 0, 1, 0, 7,
+            0x42, 0x55, 0x53, 0x31, 2, 1, 0, 0, 0, 0, 0, 32, 1, 0, 3, b'a', b'p', b'p', 0, 1, 0, 7,
             b'v', b'e', b'r', b's', b'i', b'o', b'n', 0, 0, 3, b'o', b'n', b'e', 0, 1, 0, 5, b'a',
             b'l', b'p', b'h', b'a',
         ];
@@ -1149,7 +1285,7 @@ mod tests {
             payload: b"abc".to_vec(),
         };
         let expected = [
-            0x42, 0x55, 0x53, 0x31, 1, 6, 0, 0, 0, 0, 0, 56, 0, 0, 2, 0, 9, b'b', b'u', b's', b':',
+            0x42, 0x55, 0x53, 0x31, 2, 6, 0, 0, 0, 0, 0, 56, 0, 0, 2, 0, 9, b'b', b'u', b's', b':',
             b'/', b'/', b's', b'v', b'c', 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, b'a', b'b', b'c',
         ];

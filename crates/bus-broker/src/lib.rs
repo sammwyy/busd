@@ -2,11 +2,14 @@
 #![warn(missing_docs)]
 //! Transport-independent broker state.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 
 use bus_policy::{Action, Credentials, Policy};
-use bus_protocol::{Capabilities, Channel, ClientId, Headers, Namespace, PeerId};
+use bus_protocol::{
+    Capabilities, Channel, ClientId, ClientSelection, Destination, HeaderFilter, HeaderValue,
+    Headers, Namespace, PeerId,
+};
 
 /// Claimed metadata advertised during peer setup.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -48,7 +51,8 @@ pub struct Broker<P> {
     next_peer: u64,
     peers: BTreeMap<PeerId, Peer>,
     namespaces: BTreeMap<Namespace, PeerId>,
-    subscriptions: BTreeMap<Channel, BTreeSet<PeerId>>,
+    subscriptions: BTreeMap<Channel, BTreeMap<PeerId, Vec<HeaderFilter>>>,
+    events: Vec<LifecycleEvent>,
 }
 
 impl<P: Policy> Broker<P> {
@@ -62,6 +66,7 @@ impl<P: Policy> Broker<P> {
             peers: BTreeMap::new(),
             namespaces: BTreeMap::new(),
             subscriptions: BTreeMap::new(),
+            events: Vec::new(),
         }
     }
 
@@ -75,6 +80,7 @@ impl<P: Policy> Broker<P> {
             peers: BTreeMap::new(),
             namespaces: BTreeMap::new(),
             subscriptions: BTreeMap::new(),
+            events: Vec::new(),
         }
     }
 
@@ -114,6 +120,7 @@ impl<P: Policy> Broker<P> {
                 capabilities: capabilities.clone(),
             },
         );
+        self.events.push(LifecycleEvent::PeerConnected { peer: id });
         Ok(ConnectedPeer { id, capabilities })
     }
 
@@ -122,11 +129,25 @@ impl<P: Policy> Broker<P> {
         if self.peers.remove(&peer).is_none() {
             return Err(Error::UnknownPeer(peer));
         }
+        let released: Vec<_> = self
+            .namespaces
+            .iter()
+            .filter(|(_, owner)| **owner == peer)
+            .map(|(namespace, _)| namespace.clone())
+            .collect();
         self.namespaces.retain(|_, owner| *owner != peer);
+        for namespace in released {
+            self.events.push(LifecycleEvent::NamespaceOwnerChanged {
+                namespace,
+                previous: Some(peer),
+                current: None,
+            });
+        }
         self.subscriptions.retain(|_, peers| {
             peers.remove(&peer);
             !peers.is_empty()
         });
+        self.events.push(LifecycleEvent::PeerDisconnected { peer });
         Ok(())
     }
 
@@ -140,15 +161,33 @@ impl<P: Policy> Broker<P> {
                 owner: *owner,
             });
         }
-        self.namespaces.insert(namespace, peer);
+        self.namespaces.insert(namespace.clone(), peer);
+        self.events.push(LifecycleEvent::NamespaceOwnerChanged {
+            namespace: namespace.clone(),
+            previous: None,
+            current: Some(peer),
+        });
         Ok(())
     }
 
     /// Subscribes a connected peer to an unowned channel.
     pub fn subscribe(&mut self, peer: PeerId, channel: Channel) -> Result<(), Error> {
+        self.subscribe_with_filters(peer, channel, Vec::new())
+    }
+
+    /// Subscribes a connected peer using structural message-header filters.
+    pub fn subscribe_with_filters(
+        &mut self,
+        peer: PeerId,
+        channel: Channel,
+        filters: Vec<HeaderFilter>,
+    ) -> Result<(), Error> {
         let credentials = self.credentials(peer)?;
         self.authorize(credentials, Action::Subscribe(channel.clone()))?;
-        self.subscriptions.entry(channel).or_default().insert(peer);
+        self.subscriptions
+            .entry(channel)
+            .or_default()
+            .insert(peer, filters);
         Ok(())
     }
 
@@ -175,13 +214,122 @@ impl<P: Policy> Broker<P> {
     pub fn subscribers(&self, channel: &Channel) -> Vec<PeerId> {
         self.subscriptions
             .get(channel)
-            .map_or_else(Vec::new, |peers| peers.iter().copied().collect())
+            .map_or_else(Vec::new, |peers| peers.keys().copied().collect())
     }
 
     /// Returns a connected peer's state.
     #[must_use]
     pub fn peer(&self, peer: PeerId) -> Option<&Peer> {
         self.peers.get(&peer)
+    }
+
+    /// Selects recipients for a message without inspecting its payload.
+    pub fn route(
+        &self,
+        sender: PeerId,
+        destination: &Destination,
+        headers: &Headers,
+    ) -> Result<Vec<PeerId>, Error> {
+        let credentials = self.credentials(sender)?;
+        let recipients = match destination {
+            Destination::Broker => return Err(Error::NoRecipient),
+            Destination::Peer(peer) => {
+                self.authorize(credentials, Action::SendPeer(*peer))?;
+                self.peers
+                    .contains_key(peer)
+                    .then_some(*peer)
+                    .into_iter()
+                    .collect()
+            }
+            Destination::Namespace(namespace) => {
+                self.authorize(credentials, Action::SendNamespace(namespace.clone()))?;
+                self.namespace_owner(namespace).into_iter().collect()
+            }
+            Destination::Channel(channel) => {
+                self.authorize(credentials, Action::Publish(channel.clone()))?;
+                self.subscriptions
+                    .get(channel)
+                    .map_or_else(Vec::new, |subscribers| {
+                        subscribers
+                            .iter()
+                            .filter_map(|(peer, filters)| {
+                                filters_match(filters, headers).then_some(*peer)
+                            })
+                            .collect()
+                    })
+            }
+            Destination::ClientId {
+                client_id,
+                selection,
+            } => {
+                self.authorize(credentials, Action::SendClient(client_id.clone()))?;
+                let mut matching: Vec<_> = self
+                    .peers
+                    .values()
+                    .filter(|peer| peer.hello.client_id.as_ref() == Some(client_id))
+                    .map(|peer| peer.id)
+                    .collect();
+                match selection {
+                    ClientSelection::First | ClientSelection::Any => matching.truncate(1),
+                    ClientSelection::All => {}
+                }
+                matching
+            }
+            Destination::Broadcast => {
+                self.authorize(credentials, Action::Broadcast)?;
+                self.peers
+                    .keys()
+                    .copied()
+                    .filter(|peer| *peer != sender)
+                    .collect()
+            }
+        };
+        match destination {
+            Destination::Channel(_) | Destination::Broadcast => Ok(recipients),
+            _ if recipients.is_empty() => Err(Error::NoRecipient),
+            _ => Ok(recipients),
+        }
+    }
+
+    /// Returns discovery records that keep claimed and authenticated metadata separate.
+    #[must_use]
+    pub fn peers(&self) -> Vec<PeerInfo> {
+        self.peers.values().map(PeerInfo::from).collect()
+    }
+
+    /// Returns every currently claimed namespace and its owner.
+    #[must_use]
+    pub fn namespaces(&self) -> Vec<(Namespace, PeerId)> {
+        self.namespaces
+            .iter()
+            .map(|(namespace, peer)| (namespace.clone(), *peer))
+            .collect()
+    }
+
+    /// Returns every channel with its current subscribers and filters.
+    #[must_use]
+    pub fn subscriptions(&self) -> Vec<SubscriptionInfo> {
+        self.subscriptions
+            .iter()
+            .map(|(channel, peers)| SubscriptionInfo {
+                channel: channel.clone(),
+                subscribers: peers
+                    .iter()
+                    .map(|(peer, filters)| (*peer, filters.clone()))
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// Returns broker capabilities available for future sessions.
+    #[must_use]
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
+    /// Drains lifecycle events in generation order.
+    pub fn drain_events(&mut self) -> Vec<LifecycleEvent> {
+        std::mem::take(&mut self.events)
     }
 
     fn credentials(&self, peer: PeerId) -> Result<Credentials, Error> {
@@ -198,6 +346,84 @@ impl<P: Policy> Broker<P> {
             Err(Error::Denied(action))
         }
     }
+}
+
+/// A discovery-safe view of a connected peer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerInfo {
+    /// Broker-assigned peer identity.
+    pub id: PeerId,
+    /// Client-claimed implementation identifier.
+    pub client_id: Option<ClientId>,
+    /// Client-claimed headers.
+    pub claimed_headers: Headers,
+    /// Kernel-authenticated credentials.
+    pub credentials: Credentials,
+    /// Negotiated session capabilities.
+    pub capabilities: Capabilities,
+}
+
+impl From<&Peer> for PeerInfo {
+    fn from(peer: &Peer) -> Self {
+        Self {
+            id: peer.id,
+            client_id: peer.hello.client_id.clone(),
+            claimed_headers: peer.hello.headers.clone(),
+            credentials: peer.credentials,
+            capabilities: peer.capabilities.clone(),
+        }
+    }
+}
+
+/// A discovery-safe view of a channel subscription set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionInfo {
+    /// Channel name.
+    pub channel: Channel,
+    /// Each subscriber and its structural filters.
+    pub subscribers: Vec<(PeerId, Vec<HeaderFilter>)>,
+}
+
+/// A broker lifecycle event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LifecycleEvent {
+    /// A peer completed the handshake.
+    PeerConnected {
+        /// Connected peer.
+        peer: PeerId,
+    },
+    /// A peer disconnected.
+    PeerDisconnected {
+        /// Disconnected peer.
+        peer: PeerId,
+    },
+    /// A namespace changed provider.
+    NamespaceOwnerChanged {
+        /// Namespace whose owner changed.
+        namespace: Namespace,
+        /// Previous owner, if any.
+        previous: Option<PeerId>,
+        /// Current owner, if any.
+        current: Option<PeerId>,
+    },
+}
+
+fn filters_match(filters: &[HeaderFilter], headers: &Headers) -> bool {
+    filters.iter().all(|filter| match filter {
+        HeaderFilter::Exists(name) => headers.contains_key(name),
+        HeaderFilter::NotExists(name) => !headers.contains_key(name),
+        HeaderFilter::Equal(name, value) => headers.get(name) == Some(value),
+        HeaderFilter::NotEqual(name, value) => headers.get(name) != Some(value),
+        HeaderFilter::Prefix(name, value) => match (headers.get(name), value) {
+            (Some(HeaderValue::Text(actual)), HeaderValue::Text(prefix)) => {
+                actual.starts_with(prefix)
+            }
+            (Some(HeaderValue::Binary(actual)), HeaderValue::Binary(prefix)) => {
+                actual.starts_with(prefix)
+            }
+            _ => false,
+        },
+    })
 }
 
 /// A broker operation error.
@@ -218,6 +444,8 @@ pub enum Error {
     PeerIdExhausted,
     /// A client attempted to claim broker-owned metadata.
     ReservedHeader(String),
+    /// No eligible recipient matched a unicast destination.
+    NoRecipient,
 }
 
 impl fmt::Display for Error {
@@ -238,6 +466,7 @@ impl fmt::Display for Error {
                     "claimed header {header} is reserved for the broker"
                 )
             }
+            Self::NoRecipient => formatter.write_str("no eligible recipient"),
         }
     }
 }
@@ -351,5 +580,59 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(Error::Denied(Action::Connect))));
+    }
+
+    #[test]
+    fn routing_selects_expected_recipients_and_filters() {
+        let mut broker = Broker::new(AllowAll);
+        let sender = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let provider = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let matching = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let other = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let namespace = Namespace::parse("bus://service").unwrap();
+        let channel = Channel::parse("events").unwrap();
+        broker.claim(provider, namespace.clone()).unwrap();
+        broker
+            .subscribe_with_filters(
+                matching,
+                channel.clone(),
+                vec![HeaderFilter::Equal(
+                    "kind".into(),
+                    HeaderValue::Text("match".into()),
+                )],
+            )
+            .unwrap();
+        broker.subscribe(other, channel.clone()).unwrap();
+        let headers = [("kind".into(), HeaderValue::Text("match".into()))].into();
+        assert_eq!(
+            broker
+                .route(sender, &Destination::Namespace(namespace), &headers)
+                .unwrap(),
+            vec![provider]
+        );
+        assert_eq!(
+            broker
+                .route(sender, &Destination::Peer(other), &headers)
+                .unwrap(),
+            vec![other]
+        );
+        assert_eq!(
+            broker
+                .route(sender, &Destination::Channel(channel), &headers)
+                .unwrap(),
+            vec![matching, other]
+        );
+        assert!(matches!(
+            broker.route(sender, &Destination::Peer(PeerId::new(99)), &headers),
+            Err(Error::NoRecipient)
+        ));
     }
 }
