@@ -2,7 +2,10 @@
 
 `busd` is a generic local message broker for Linux IPC. It routes opaque binary payloads; applications own payload semantics.
 
-The project is an early BUS/1 implementation scaffold. It establishes the crate boundaries and validates the core broker invariants, but the BUS/1 wire ABI, framing, FD passing, routing execution, acknowledgement tracking, and production policy configuration are not implemented yet.
+The project is an early BUS/1 implementation. It establishes crate boundaries,
+the BUS/1-preview frame ABI and codec, and core broker invariants. Session
+handling, routing execution, FD passing, acknowledgement tracking, and
+production policy configuration are not implemented yet.
 
 ## Run
 
@@ -20,20 +23,17 @@ rm -f /tmp/busd.sock
 
 The default socket is `/run/busd/busd.sock`; its parent directory must be managed by the service installation.
 
-## Debug client
+## Client status
 
-`busd` also provides raw-packet diagnostics over the native transport. These commands do not encode BUS/1 messages and must not be used as an application API.
+`busd` currently exposes no supported interactive client. Use the
+`bus-protocol` codec to produce valid BUS/1-preview frames while Phase 2 adds
+typed session operations.
 
-```bash
-cargo run -p busd -- client --socket /tmp/busd.sock
-cargo run -p busd -- send --socket /tmp/busd.sock --hex DEADBEEF
-```
-
-The interactive client accepts one hexadecimal packet per line and exits with `quit`. The daemon reports each received debug packet's size.
+See the [BUS/1-preview wire protocol](docs/wire-protocol.md) for the packet ABI.
 
 ## Workspace
 
-- `bus-protocol`: transport-independent BUS/1 model.
+- `bus-protocol`: transport-independent BUS/1 model and preview codec.
 - `bus-client`: application-facing dependency; it re-exports BUS/1 types and opens native connections.
 - `bus-policy`: authorization boundary and authenticated credentials.
 - `bus-broker`: in-memory peers, exclusive namespaces, and channel subscriptions.

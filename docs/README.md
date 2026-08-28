@@ -5,6 +5,8 @@ matches your goal:
 
 - [BUS/1 design specification](SPECS.md) — protocol design, constraints, and
   future capabilities.
+- [BUS/1-preview wire protocol](wire-protocol.md) — normative packet ABI and
+  compatibility policy.
 - [Foundation guide](development/foundation.md) — supported environments, crate
   ownership, development checks, and documentation rules.
 - [Project roadmap](../ROADMAP.md) — implementation phases and release milestones.
