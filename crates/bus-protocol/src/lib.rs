@@ -421,6 +421,44 @@ impl fmt::Display for CodecError {
 }
 impl std::error::Error for CodecError {}
 
+/// A configured BUS/1-preview frame encoder.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Encoder {
+    limits: FrameLimits,
+}
+
+impl Encoder {
+    /// Creates an encoder that enforces `limits`.
+    #[must_use]
+    pub const fn new(limits: FrameLimits) -> Self {
+        Self { limits }
+    }
+
+    /// Encodes `frame` into one complete native packet.
+    pub fn encode(&self, frame: &Frame) -> Result<Vec<u8>, CodecError> {
+        frame.encode_with_limits(self.limits)
+    }
+}
+
+/// A configured BUS/1-preview frame decoder.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Decoder {
+    limits: FrameLimits,
+}
+
+impl Decoder {
+    /// Creates a decoder that enforces `limits`.
+    #[must_use]
+    pub const fn new(limits: FrameLimits) -> Self {
+        Self { limits }
+    }
+
+    /// Decodes one complete native packet into a frame.
+    pub fn decode(&self, packet: &[u8]) -> Result<Frame, CodecError> {
+        Frame::decode_with_limits(packet, self.limits)
+    }
+}
+
 impl Frame {
     /// Encodes this frame using the standard preview limits.
     pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
@@ -1095,8 +1133,8 @@ mod tests {
             b'v', b'e', b'r', b's', b'i', b'o', b'n', 0, 0, 3, b'o', b'n', b'e', 0, 1, 0, 5, b'a',
             b'l', b'p', b'h', b'a',
         ];
-        assert_eq!(frame.encode().unwrap(), expected);
-        assert_eq!(Frame::decode(&expected).unwrap(), frame);
+        assert_eq!(Encoder::default().encode(&frame).unwrap(), expected);
+        assert_eq!(Decoder::default().decode(&expected).unwrap(), frame);
     }
     #[test]
     fn message_golden_vector_round_trips() {
@@ -1170,6 +1208,45 @@ mod tests {
             }),
             Err(CodecError::LimitExceeded("capability count"))
         );
+    }
+    #[test]
+    fn control_frames_and_header_values_round_trip() {
+        let frames = [
+            Frame::Welcome {
+                peer_id: PeerId::new(7),
+                capabilities: ["fd-passing".into()].into(),
+            },
+            Frame::Claim {
+                namespace: Namespace::parse("bus://service").unwrap(),
+                headers: [
+                    ("data".into(), HeaderValue::Binary(vec![1, 2])),
+                    ("enabled".into(), HeaderValue::Boolean(true)),
+                ]
+                .into(),
+            },
+            Frame::Subscribe {
+                channel: Channel::parse("events").unwrap(),
+                filters: vec![
+                    HeaderFilter::Exists("kind".into()),
+                    HeaderFilter::Prefix("source".into(), HeaderValue::Text("sys".into())),
+                ],
+            },
+            Frame::Unsubscribe {
+                channel: Channel::parse("events").unwrap(),
+            },
+            Frame::ProtocolError {
+                code: ProtocolErrorCode::InvalidState,
+                message: "HELLO already received".into(),
+            },
+        ];
+        let encoder = Encoder::default();
+        let decoder = Decoder::default();
+        for frame in frames {
+            assert_eq!(
+                decoder.decode(&encoder.encode(&frame).unwrap()).unwrap(),
+                frame
+            );
+        }
     }
     #[test]
     fn arbitrary_input_never_panics() {
