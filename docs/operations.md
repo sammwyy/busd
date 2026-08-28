@@ -88,6 +88,31 @@ reliable delivery, so priority or capacity settings cannot grant an otherwise
 denied operation. `--unsafe-allow-all` is available only for explicit local
 development and cannot be combined with `--policy`.
 
+Reliable-delivery retries use seven priority levels: the optional unsigned
+message header `priority` accepts `0` through `7`, where `7` is dispatched
+first when multiple retry jobs are due. Priority is not an authorization
+selector and never overrides a denied action. Retained reliable deliveries are
+bounded by the queue limits above; excess work is rejected for that sender.
+
+## Monitoring and metrics
+
+The broker exposes a policy-gated monitoring API for integrations embedded with
+the daemon. A monitor rule is required. Monitor records include the transition,
+peer ID, destination label, logical message ID, and payload length. They never
+contain payload bytes, headers, client-claimed metadata, or authenticated
+credentials. The bounded history retains the most recent 1,024 records.
+
+The broker metrics snapshot reports connected peers, namespaces, subscriptions,
+messages and bytes routed, timeouts, retries, and dropped best-effort signals.
+The daemon emits connection records as structured log fields and does not log
+opaque payloads.
+
+Check that a running daemon accepts native connections with:
+
+```text
+busd health --socket /run/busd/busd.sock
+```
+
 ## Troubleshooting
 
 Use the daemon's structured diagnostics to identify a denied operation by peer

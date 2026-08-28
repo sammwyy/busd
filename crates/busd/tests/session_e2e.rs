@@ -238,6 +238,62 @@ fn requests_acknowledgements_and_no_recipient_outcomes_work_over_native_sockets(
     consumer.disconnect().unwrap();
 }
 
+#[test]
+fn configured_policy_denies_broadcast_and_health_check_reaches_daemon() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let socket = std::env::temp_dir().join(format!("busd-policy-{nonce}.sock"));
+    let policy = std::env::temp_dir().join(format!("busd-policy-{nonce}.conf"));
+    std::fs::write(
+        &policy,
+        "version = 1\ndefault = allow\n[[rule]]\neffect = deny\nactions = broadcast\n",
+    )
+    .unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_busd"))
+        .args(["daemon", "--socket"])
+        .arg(&socket)
+        .args(["--policy"])
+        .arg(&policy)
+        .spawn()
+        .unwrap();
+    let daemon = Daemon {
+        child,
+        socket: socket.clone(),
+    };
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(socket.exists());
+    let health = Command::new(env!("CARGO_BIN_EXE_busd"))
+        .args(["health", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert!(health.status.success());
+    assert!(
+        String::from_utf8(health.stdout)
+            .unwrap()
+            .contains("health=ok")
+    );
+
+    let sender = Bus::connect(ConnectOptions::new(&socket)).unwrap();
+    sender
+        .send_message(&message(Destination::Broadcast, b"denied"))
+        .unwrap();
+    assert!(matches!(
+        sender.receive_frame().unwrap(),
+        Some(Frame::ProtocolError { .. })
+    ));
+    sender.disconnect().unwrap();
+    drop(daemon);
+    std::fs::remove_file(policy).unwrap();
+}
+
 fn message(destination: Destination, payload: &[u8]) -> Frame {
     Frame::Message {
         kind: MessageKind::Signal,

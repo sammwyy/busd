@@ -16,11 +16,16 @@ use bus_transport_unix::{Connection, Listener};
 
 const DEFAULT_SOCKET: &str = "/run/busd/busd.sock";
 
-struct Command {
+struct DaemonCommand {
     socket: PathBuf,
     policy: PolicySource,
     limits: Limits,
     maximum_frame_size: usize,
+}
+
+enum Command {
+    Daemon(DaemonCommand),
+    Health { socket: PathBuf },
 }
 
 enum PolicySource {
@@ -48,7 +53,10 @@ impl Policy for DaemonPolicy {
 #[cfg(feature = "unix")]
 fn main() -> io::Result<()> {
     let command = parse_command(env::args_os().skip(1))?;
-    run_daemon(command)
+    match command {
+        Command::Daemon(command) => run_daemon(command),
+        Command::Health { socket } => run_health(socket),
+    }
 }
 
 #[cfg(not(feature = "unix"))]
@@ -67,10 +75,13 @@ fn parse_command(arguments: impl Iterator<Item = OsString>) -> io::Result<Comman
         .and_then(|value| value.into_string().ok())
         .as_deref()
     {
-        Some("daemon") => {}
-        _ => return Err(usage()),
+        Some("daemon") => parse_daemon_command(arguments),
+        Some("health") => parse_health_command(arguments),
+        _ => Err(usage()),
     }
+}
 
+fn parse_daemon_command(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Command> {
     let mut socket = PathBuf::from(DEFAULT_SOCKET);
     let mut policy = PolicySource::SafeDefaults;
     let mut limits = Limits::default();
@@ -112,12 +123,24 @@ fn parse_command(arguments: impl Iterator<Item = OsString>) -> io::Result<Comman
             _ => return Err(usage()),
         }
     }
-    Ok(Command {
+    Ok(Command::Daemon(DaemonCommand {
         socket,
         policy,
         limits,
         maximum_frame_size,
-    })
+    }))
+}
+
+fn parse_health_command(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Command> {
+    let mut socket = PathBuf::from(DEFAULT_SOCKET);
+    while let Some(argument) = arguments.next() {
+        if argument == "--socket" {
+            socket = arguments.next().ok_or_else(usage)?.into();
+        } else {
+            return Err(usage());
+        }
+    }
+    Ok(Command::Health { socket })
 }
 
 fn parse_limit(value: OsString) -> io::Result<usize> {
@@ -132,12 +155,12 @@ fn parse_limit(value: OsString) -> io::Result<usize> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: busd daemon [--socket PATH] [--policy PATH | --unsafe-allow-all] [--maximum-frame-size BYTES] [--maximum-queued-bytes BYTES] [--maximum-queued-messages COUNT] [--maximum-in-flight-requests COUNT] [--maximum-subscriptions COUNT] [--maximum-namespace-claims COUNT]",
+        "usage: busd daemon [--socket PATH] [--policy PATH | --unsafe-allow-all] [--maximum-frame-size BYTES] [--maximum-queued-bytes BYTES] [--maximum-queued-messages COUNT] [--maximum-in-flight-requests COUNT] [--maximum-subscriptions COUNT] [--maximum-namespace-claims COUNT] | busd health [--socket PATH]",
     )
 }
 
 #[cfg(feature = "unix")]
-fn run_daemon(command: Command) -> io::Result<()> {
+fn run_daemon(command: DaemonCommand) -> io::Result<()> {
     let policy = match command.policy {
         PolicySource::SafeDefaults => DaemonPolicy::SafeDefaults(SafeDefaults),
         PolicySource::File(path) => DaemonPolicy::File(
@@ -156,11 +179,27 @@ fn run_daemon(command: Command) -> io::Result<()> {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_millis(5));
-            let events = match scheduler_broker.lock() {
-                Ok(mut broker) => broker.tick(now_ms()),
+            let (events, metrics) = match scheduler_broker.lock() {
+                Ok(mut broker) => {
+                    let events = broker.tick(now_ms());
+                    (events, broker.metrics())
+                }
                 Err(_) => return,
             };
             let _ = dispatch_delivery_events(&scheduler_sessions, events, limits);
+            if now_ms() % 30_000 < 5 {
+                eprintln!(
+                    "busd event=metrics peers={} namespaces={} subscriptions={} messages_routed={} bytes_routed={} timeouts={} retries={} dropped_signals={}",
+                    metrics.connected_peers,
+                    metrics.namespaces,
+                    metrics.subscriptions,
+                    metrics.totals.messages_routed,
+                    metrics.totals.bytes_routed,
+                    metrics.totals.timeouts,
+                    metrics.totals.retries,
+                    metrics.totals.dropped_signals,
+                );
+            }
         }
     });
     let listener = Listener::bind(&command.socket)?;
@@ -175,6 +214,14 @@ fn run_daemon(command: Command) -> io::Result<()> {
             }
         });
     }
+}
+
+#[cfg(feature = "unix")]
+fn run_health(socket: PathBuf) -> io::Result<()> {
+    let connection = Connection::connect(&socket)?;
+    drop(connection);
+    println!("busd health=ok socket={}", socket.display());
+    Ok(())
 }
 
 #[cfg(feature = "unix")]
@@ -213,7 +260,10 @@ fn serve_peer<P: Policy>(
         .connect_session(credentials.clone(), hello)
     {
         Ok(session) => session,
-        Err(error) => return reject(&peer, ProtocolErrorCode::InvalidState, &error.to_string()),
+        Err(error) => {
+            log_connection_error(&credentials, &error);
+            return reject(&peer, ProtocolErrorCode::InvalidState, &error.to_string());
+        }
     };
     peer.send_packet(
         &Frame::Welcome {
@@ -272,7 +322,13 @@ fn dispatch_session<P: Policy>(
         match frame {
             Frame::Claim { namespace, headers } if headers.is_empty() => {
                 let result = broker.lock().map_err(lock_error)?.claim(peer_id, namespace);
-                send_control_result(peer, result, bus_protocol::ControlOperation::Claim, limits)?;
+                send_control_result(
+                    peer,
+                    peer_id,
+                    result,
+                    bus_protocol::ControlOperation::Claim,
+                    limits,
+                )?;
                 continue;
             }
             Frame::Claim { .. } => {
@@ -289,6 +345,7 @@ fn dispatch_session<P: Policy>(
                     .subscribe_with_filters(peer_id, channel, filters);
                 send_control_result(
                     peer,
+                    peer_id,
                     result,
                     bus_protocol::ControlOperation::Subscribe,
                     limits,
@@ -302,6 +359,7 @@ fn dispatch_session<P: Policy>(
                     .unsubscribe(peer_id, &channel);
                 send_control_result(
                     peer,
+                    peer_id,
                     result,
                     bus_protocol::ControlOperation::Unsubscribe,
                     limits,
@@ -328,6 +386,7 @@ fn dispatch_session<P: Policy>(
                 ) {
                     Ok(events) => events,
                     Err(error) => {
+                        log_operation_error(peer_id, &error);
                         peer.send_packet(
                             &Frame::ProtocolError {
                                 code: broker_error_code(&error),
@@ -350,6 +409,7 @@ fn dispatch_session<P: Policy>(
                 {
                     Ok(events) => events,
                     Err(error) => {
+                        log_operation_error(peer_id, &error);
                         peer.send_packet(
                             &Frame::ProtocolError {
                                 code: ProtocolErrorCode::InvalidState,
@@ -482,16 +542,20 @@ fn credentials_from_peer(peer: bus_transport_unix::PeerCredentials) -> Credentia
 #[cfg(feature = "unix")]
 fn send_control_result(
     peer: &Connection,
+    peer_id: bus_protocol::PeerId,
     result: Result<(), bus_broker::Error>,
     operation: bus_protocol::ControlOperation,
     limits: FrameLimits,
 ) -> io::Result<()> {
     let frame = match result {
         Ok(()) => Frame::ControlResult { operation },
-        Err(error) => Frame::ProtocolError {
-            code: ProtocolErrorCode::InvalidState,
-            message: error.to_string(),
-        },
+        Err(error) => {
+            log_operation_error(peer_id, &error);
+            Frame::ProtocolError {
+                code: broker_error_code(&error),
+                message: error.to_string(),
+            }
+        }
     };
     peer.send_packet(&frame.encode_with_limits(limits).map_err(codec_io_error)?)
 }
@@ -502,6 +566,29 @@ fn broker_error_code(error: &BrokerError) -> ProtocolErrorCode {
         BrokerError::NoRecipient => ProtocolErrorCode::NoRecipient,
         BrokerError::LimitExceeded(_) => ProtocolErrorCode::LimitExceeded,
         _ => ProtocolErrorCode::InvalidState,
+    }
+}
+
+#[cfg(feature = "unix")]
+fn log_connection_error(credentials: &Credentials, error: &BrokerError) {
+    eprintln!(
+        "busd event=connection_denied pid={} uid={} gid={} reason={}",
+        credentials.pid, credentials.uid, credentials.gid, error
+    );
+}
+
+#[cfg(feature = "unix")]
+fn log_operation_error(peer: bus_protocol::PeerId, error: &BrokerError) {
+    match error {
+        BrokerError::Denied(action) => eprintln!(
+            "busd event=policy_denied peer={} action={}",
+            peer,
+            action.name()
+        ),
+        BrokerError::LimitExceeded(limit) => {
+            eprintln!("busd event=limit_exceeded peer={} limit={limit:?}", peer)
+        }
+        _ => eprintln!("busd event=operation_failed peer={} reason={}", peer, error),
     }
 }
 
@@ -563,19 +650,36 @@ mod tests {
 
     #[test]
     fn daemon_uses_the_system_socket_by_default() {
-        let command = parse_command(["daemon".into()].into_iter()).unwrap();
+        let Command::Daemon(command) = parse_command(["daemon".into()].into_iter()).unwrap() else {
+            panic!("expected daemon command");
+        };
         assert_eq!(command.socket, PathBuf::from(DEFAULT_SOCKET));
     }
 
     #[test]
     fn daemon_accepts_a_custom_socket() {
-        let command = parse_command(
+        let Command::Daemon(command) = parse_command(
             ["daemon", "--socket", "/tmp/busd.sock"]
                 .into_iter()
                 .map(OsString::from),
         )
-        .unwrap();
+        .unwrap() else {
+            panic!("expected daemon command");
+        };
         assert_eq!(command.socket, PathBuf::from("/tmp/busd.sock"));
+    }
+
+    #[test]
+    fn health_command_accepts_a_custom_socket() {
+        let Command::Health { socket } = parse_command(
+            ["health", "--socket", "/tmp/busd.sock"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .unwrap() else {
+            panic!("expected health command");
+        };
+        assert_eq!(socket, PathBuf::from("/tmp/busd.sock"));
     }
 
     #[cfg(feature = "unix")]

@@ -2,7 +2,7 @@
 #![warn(missing_docs)]
 //! Transport-independent broker state.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use bus_policy::{Action, Credentials, Policy, Request as PolicyRequest};
@@ -56,6 +56,80 @@ pub struct Broker<P> {
     subscriptions: BTreeMap<Channel, BTreeMap<PeerId, Vec<HeaderFilter>>>,
     deliveries: BTreeMap<MessageId, PendingDelivery>,
     events: Vec<LifecycleEvent>,
+    metrics: Metrics,
+    monitor_events: VecDeque<MonitorEvent>,
+    next_monitor_sequence: u64,
+}
+
+/// A redacted monitoring record.
+///
+/// Message payloads, headers, claimed metadata, and authenticated credentials
+/// are intentionally absent from this record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonitorEvent {
+    /// Monotonic broker-local record sequence.
+    pub sequence: u64,
+    /// The observed broker transition.
+    pub kind: MonitorKind,
+    /// Peer responsible for the transition, where applicable.
+    pub peer: PeerId,
+    /// The operation target, where applicable.
+    pub target: Option<String>,
+    /// Stable logical message identifier, where applicable.
+    pub message_id: Option<MessageId>,
+    /// Opaque payload length; payload bytes are never exposed.
+    pub payload_bytes: usize,
+}
+
+/// The type of a redacted monitoring record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MonitorKind {
+    /// A peer connected.
+    Connected,
+    /// A peer disconnected.
+    Disconnected,
+    /// A namespace was claimed.
+    NamespaceClaimed,
+    /// A channel was subscribed.
+    Subscribed,
+    /// A message was routed.
+    Delivered,
+    /// A receiver acknowledged a message.
+    Acknowledged,
+    /// A reliable delivery timed out.
+    TimedOut,
+    /// A reliable delivery was retried.
+    Retried,
+    /// A best-effort signal had no recipients.
+    DroppedSignal,
+}
+
+/// Broker counters suitable for structured operational reporting.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Metrics {
+    /// Messages selected for delivery.
+    pub messages_routed: u64,
+    /// Opaque payload bytes selected for delivery.
+    pub bytes_routed: u64,
+    /// Expired reliable deliveries.
+    pub timeouts: u64,
+    /// Broker-managed repeated deliveries.
+    pub retries: u64,
+    /// Best-effort signals with no recipient.
+    pub dropped_signals: u64,
+}
+
+/// A point-in-time broker metrics report.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MetricsSnapshot {
+    /// Connected peer count.
+    pub connected_peers: usize,
+    /// Claimed namespace count.
+    pub namespaces: usize,
+    /// Channel subscription count.
+    pub subscriptions: usize,
+    /// Cumulative broker counters.
+    pub totals: Metrics,
 }
 
 /// Per-peer resource limits enforced by the broker.
@@ -110,6 +184,7 @@ struct PendingDelivery {
     deadline_ms: u64,
     attempts: u8,
     next_retry_ms: Option<u64>,
+    priority: u8,
 }
 
 /// Work the daemon must perform after a broker reliability transition.
@@ -155,6 +230,9 @@ impl<P: Policy> Broker<P> {
             subscriptions: BTreeMap::new(),
             deliveries: BTreeMap::new(),
             events: Vec::new(),
+            metrics: Metrics::default(),
+            monitor_events: VecDeque::new(),
+            next_monitor_sequence: 1,
         }
     }
 
@@ -171,6 +249,9 @@ impl<P: Policy> Broker<P> {
             subscriptions: BTreeMap::new(),
             deliveries: BTreeMap::new(),
             events: Vec::new(),
+            metrics: Metrics::default(),
+            monitor_events: VecDeque::new(),
+            next_monitor_sequence: 1,
         }
     }
 
@@ -211,6 +292,7 @@ impl<P: Policy> Broker<P> {
             },
         );
         self.events.push(LifecycleEvent::PeerConnected { peer: id });
+        self.record_monitor(MonitorKind::Connected, id, None, None, 0);
         Ok(ConnectedPeer { id, capabilities })
     }
 
@@ -242,6 +324,7 @@ impl<P: Policy> Broker<P> {
             !peers.is_empty()
         });
         self.events.push(LifecycleEvent::PeerDisconnected { peer });
+        self.record_monitor(MonitorKind::Disconnected, peer, None, None, 0);
         Ok(())
     }
 
@@ -269,6 +352,13 @@ impl<P: Policy> Broker<P> {
             previous: None,
             current: Some(peer),
         });
+        self.record_monitor(
+            MonitorKind::NamespaceClaimed,
+            peer,
+            Some(namespace.to_string()),
+            None,
+            0,
+        );
         Ok(())
     }
 
@@ -300,9 +390,16 @@ impl<P: Policy> Broker<P> {
             return Err(Error::LimitExceeded(Limit::Subscriptions));
         }
         self.subscriptions
-            .entry(channel)
+            .entry(channel.clone())
             .or_default()
             .insert(peer, filters);
+        self.record_monitor(
+            MonitorKind::Subscribed,
+            peer,
+            Some(channel.to_string()),
+            None,
+            0,
+        );
         Ok(())
     }
 
@@ -430,6 +527,7 @@ impl<P: Policy> Broker<P> {
         };
         self.credentials(sender)?;
         validate_message_headers(headers)?;
+        let priority = message_priority(headers)?;
         if *kind == MessageKind::Response {
             return self.complete_response(sender, message);
         }
@@ -449,6 +547,29 @@ impl<P: Policy> Broker<P> {
             Err(error) => return Err(error),
         };
         let recipients: BTreeSet<_> = recipients.into_iter().collect();
+        let payload_bytes = payload_bytes(&message);
+        self.metrics.messages_routed = self
+            .metrics
+            .messages_routed
+            .saturating_add(recipients.len() as u64);
+        self.metrics.bytes_routed = self
+            .metrics
+            .bytes_routed
+            .saturating_add((payload_bytes as u64).saturating_mul(recipients.len() as u64));
+        self.record_monitor(
+            if recipients.is_empty() {
+                MonitorKind::DroppedSignal
+            } else {
+                MonitorKind::Delivered
+            },
+            sender,
+            Some(destination_label(destination)),
+            Some(*message_id),
+            payload_bytes,
+        );
+        if recipients.is_empty() && *kind == MessageKind::Signal {
+            self.metrics.dropped_signals = self.metrics.dropped_signals.saturating_add(1);
+        }
         if recipients.is_empty()
             && (*kind == MessageKind::Request
                 || matches!(ack_policy, AckPolicy::Received | AckPolicy::Processed))
@@ -498,6 +619,7 @@ impl<P: Policy> Broker<P> {
                     deadline_ms,
                     attempts: 1,
                     next_retry_ms: retry_next(retry, now_ms, 1),
+                    priority,
                 },
             );
         }
@@ -512,42 +634,54 @@ impl<P: Policy> Broker<P> {
         policy: AckPolicy,
     ) -> Result<Vec<DeliveryEvent>, Error> {
         self.authorize(peer, Action::Acknowledge)?;
-        let pending = self
-            .deliveries
-            .get_mut(&message_id)
-            .ok_or(Error::UnknownDelivery(message_id))?;
-        let Frame::Message {
-            kind,
-            ack_policy,
-            ack_requirement,
-            ..
-        } = &pending.message
-        else {
-            return Err(Error::InvalidDelivery);
-        };
-        if !pending.recipients.contains(&peer) || !acknowledgement_satisfies(*ack_policy, policy) {
-            return Err(Error::UnexpectedAcknowledgement(message_id));
-        }
-        pending.acknowledgements.insert(peer);
-        if pending.acknowledgement_complete
-            || !requirement_met(
-                *ack_requirement,
-                pending.acknowledgements.len(),
-                pending.recipients.len(),
-            )
-        {
-            return Ok(Vec::new());
-        }
-        pending.acknowledgement_complete = true;
-        let outcome = match ack_policy {
-            AckPolicy::Received => DeliveryOutcome::Received,
-            AckPolicy::Processed => DeliveryOutcome::Processed,
-            AckPolicy::None | AckPolicy::Accepted => {
+        let (complete, sender, outcome, remove) = {
+            let pending = self
+                .deliveries
+                .get_mut(&message_id)
+                .ok_or(Error::UnknownDelivery(message_id))?;
+            let Frame::Message {
+                kind,
+                ack_policy,
+                ack_requirement,
+                ..
+            } = &pending.message
+            else {
+                return Err(Error::InvalidDelivery);
+            };
+            if !pending.recipients.contains(&peer)
+                || !acknowledgement_satisfies(*ack_policy, policy)
+            {
                 return Err(Error::UnexpectedAcknowledgement(message_id));
             }
+            pending.acknowledgements.insert(peer);
+            let complete = !pending.acknowledgement_complete
+                && requirement_met(
+                    *ack_requirement,
+                    pending.acknowledgements.len(),
+                    pending.recipients.len(),
+                );
+            let outcome = match ack_policy {
+                AckPolicy::Received => DeliveryOutcome::Received,
+                AckPolicy::Processed => DeliveryOutcome::Processed,
+                AckPolicy::None | AckPolicy::Accepted => {
+                    return Err(Error::UnexpectedAcknowledgement(message_id));
+                }
+            };
+            if complete {
+                pending.acknowledgement_complete = true;
+            }
+            (
+                complete,
+                pending.sender,
+                outcome,
+                *kind != MessageKind::Request,
+            )
         };
-        let sender = pending.sender;
-        if *kind != MessageKind::Request {
+        self.record_monitor(MonitorKind::Acknowledged, peer, None, Some(message_id), 0);
+        if !complete {
+            return Ok(Vec::new());
+        }
+        if remove {
             self.deliveries.remove(&message_id);
         }
         Ok(vec![DeliveryEvent::Result {
@@ -561,6 +695,7 @@ impl<P: Policy> Broker<P> {
     pub fn tick(&mut self, now_ms: u64) -> Vec<DeliveryEvent> {
         let ids: Vec<_> = self.deliveries.keys().copied().collect();
         let mut events = Vec::new();
+        let mut retries = Vec::new();
         for message_id in ids {
             let Some(pending) = self.deliveries.get(&message_id) else {
                 continue;
@@ -568,6 +703,8 @@ impl<P: Policy> Broker<P> {
             if now_ms >= pending.deadline_ms {
                 let sender = pending.sender;
                 self.deliveries.remove(&message_id);
+                self.metrics.timeouts = self.metrics.timeouts.saturating_add(1);
+                self.record_monitor(MonitorKind::TimedOut, sender, None, Some(message_id), 0);
                 events.push(DeliveryEvent::Result {
                     sender,
                     message_id,
@@ -604,16 +741,32 @@ impl<P: Policy> Broker<P> {
             }
             pending.attempts += 1;
             pending.next_retry_ms = retry_next(retry, now_ms, pending.attempts);
-            events.push(DeliveryEvent::Deliver {
-                sender: pending.sender,
-                recipients: pending
-                    .recipients
-                    .difference(&pending.acknowledgements)
-                    .copied()
-                    .collect(),
-                message: pending.message.clone(),
-            });
+            let sender = pending.sender;
+            let payload_bytes = delivery_bytes(&pending.message);
+            retries.push((
+                pending.priority,
+                DeliveryEvent::Deliver {
+                    sender,
+                    recipients: pending
+                        .recipients
+                        .difference(&pending.acknowledgements)
+                        .copied()
+                        .collect(),
+                    message: pending.message.clone(),
+                },
+            ));
+            let _ = pending;
+            self.metrics.retries = self.metrics.retries.saturating_add(1);
+            self.record_monitor(
+                MonitorKind::Retried,
+                sender,
+                None,
+                Some(message_id),
+                payload_bytes,
+            );
         }
+        retries.sort_by(|(left, _), (right, _)| right.cmp(left));
+        events.extend(retries.into_iter().map(|(_, event)| event));
         events
     }
 
@@ -739,6 +892,46 @@ impl<P: Policy> Broker<P> {
     /// Drains lifecycle events in generation order.
     pub fn drain_events(&mut self) -> Vec<LifecycleEvent> {
         std::mem::take(&mut self.events)
+    }
+
+    /// Returns redacted monitoring records after authorizing monitor access.
+    pub fn monitor_events(&self, peer: PeerId) -> Result<Vec<MonitorEvent>, Error> {
+        self.authorize(peer, Action::Monitor)?;
+        Ok(self.monitor_events.iter().cloned().collect())
+    }
+
+    /// Returns a current metrics snapshot without exposing message contents.
+    #[must_use]
+    pub fn metrics(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            connected_peers: self.peers.len(),
+            namespaces: self.namespaces.len(),
+            subscriptions: self.subscriptions.values().map(BTreeMap::len).sum(),
+            totals: self.metrics,
+        }
+    }
+
+    fn record_monitor(
+        &mut self,
+        kind: MonitorKind,
+        peer: PeerId,
+        target: Option<String>,
+        message_id: Option<MessageId>,
+        payload_bytes: usize,
+    ) {
+        const MAX_MONITOR_EVENTS: usize = 1_024;
+        if self.monitor_events.len() == MAX_MONITOR_EVENTS {
+            self.monitor_events.pop_front();
+        }
+        self.monitor_events.push_back(MonitorEvent {
+            sequence: self.next_monitor_sequence,
+            kind,
+            peer,
+            target,
+            message_id,
+            payload_bytes,
+        });
+        self.next_monitor_sequence = self.next_monitor_sequence.saturating_add(1);
     }
 
     fn credentials(&self, peer: PeerId) -> Result<Credentials, Error> {
@@ -909,6 +1102,14 @@ fn validate_message_headers(headers: &Headers) -> Result<(), Error> {
     Ok(())
 }
 
+fn message_priority(headers: &Headers) -> Result<u8, Error> {
+    match headers.get("priority") {
+        None => Ok(0),
+        Some(HeaderValue::Unsigned(priority @ 0..=7)) => Ok(*priority as u8),
+        Some(_) => Err(Error::InvalidPriority),
+    }
+}
+
 fn requirement_possible(requirement: AckRequirement, recipients: usize) -> bool {
     match requirement {
         AckRequirement::None => true,
@@ -980,6 +1181,27 @@ fn delivery_bytes(message: &Frame) -> usize {
     }
 }
 
+fn payload_bytes(message: &Frame) -> usize {
+    match message {
+        Frame::Message { payload, .. } => payload.len(),
+        _ => 0,
+    }
+}
+
+fn destination_label(destination: &Destination) -> String {
+    match destination {
+        Destination::Broker => "broker".into(),
+        Destination::Peer(peer) => peer.to_string(),
+        Destination::Namespace(namespace) => namespace.to_string(),
+        Destination::Channel(channel) => channel.to_string(),
+        Destination::Broadcast => "broadcast".into(),
+        Destination::ClientId {
+            client_id,
+            selection,
+        } => format!("{client_id}:{selection:?}"),
+    }
+}
+
 /// A broker operation error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -1014,6 +1236,8 @@ pub enum Error {
     DeadlineOverflow,
     /// A peer exceeded an enforced resource limit.
     LimitExceeded(Limit),
+    /// A message used an invalid scheduling priority.
+    InvalidPriority,
 }
 
 impl fmt::Display for Error {
@@ -1052,6 +1276,9 @@ impl fmt::Display for Error {
                 formatter.write_str("message deadline overflowed broker clock")
             }
             Self::LimitExceeded(limit) => write!(formatter, "broker limit exceeded: {limit:?}"),
+            Self::InvalidPriority => {
+                formatter.write_str("message priority must be an unsigned value from 0 through 7")
+            }
         }
     }
 }
@@ -1571,5 +1798,123 @@ mod tests {
             Err(Error::LimitExceeded(Limit::QueuedMessages))
         ));
         assert_eq!(broker.peer(recipient).unwrap().id, recipient);
+    }
+
+    #[test]
+    fn privileged_monitoring_is_redacted_and_counted() {
+        let mut broker = Broker::new(AllowAll);
+        let sender = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let recipient = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let message = Frame::Message {
+            kind: MessageKind::Signal,
+            ack_policy: AckPolicy::None,
+            ack_requirement: AckRequirement::None,
+            request_policy: RequestPolicy::Exact,
+            deadline_ms: 0,
+            retry: RetryPolicy::None,
+            destination: Destination::Peer(recipient),
+            message_id: MessageId::new([51; 16]),
+            correlation_id: MessageId::absent(),
+            status: Status::Success,
+            headers: [("secret".into(), HeaderValue::Text("do-not-expose".into()))].into(),
+            payload: b"opaque".to_vec(),
+        };
+        broker.begin_delivery(sender, message, 0).unwrap();
+        let records = broker.monitor_events(sender).unwrap();
+        assert!(records.iter().any(|record| {
+            record.kind == MonitorKind::Delivered
+                && record.payload_bytes == 6
+                && record.target.as_deref() == Some(&recipient.to_string())
+        }));
+        assert_eq!(broker.metrics().totals.messages_routed, 1);
+        assert_eq!(broker.metrics().totals.bytes_routed, 6);
+
+        struct NoMonitor;
+        impl Policy for NoMonitor {
+            fn permits(&self, request: &PolicyRequest<'_>) -> bool {
+                !matches!(request.action, Action::Monitor)
+            }
+        }
+        let mut denied = Broker::new(NoMonitor);
+        let peer = denied
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        assert!(matches!(
+            denied.monitor_events(peer),
+            Err(Error::Denied(Action::Monitor))
+        ));
+    }
+
+    #[test]
+    fn retries_are_priority_scheduled_after_authorization() {
+        let mut broker = Broker::new(AllowAll);
+        let sender = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let recipient = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let mut low = reliable_message(
+            MessageKind::Signal,
+            Destination::Peer(recipient),
+            61,
+            AckPolicy::Processed,
+            RetryPolicy::Exponential {
+                initial_backoff_ms: 10,
+                max_attempts: 2,
+            },
+        );
+        let mut high = reliable_message(
+            MessageKind::Signal,
+            Destination::Peer(recipient),
+            62,
+            AckPolicy::Processed,
+            RetryPolicy::Exponential {
+                initial_backoff_ms: 10,
+                max_attempts: 2,
+            },
+        );
+        if let Frame::Message { headers, .. } = &mut low {
+            headers.insert("priority".into(), HeaderValue::Unsigned(1));
+        }
+        if let Frame::Message { headers, .. } = &mut high {
+            headers.insert("priority".into(), HeaderValue::Unsigned(7));
+        }
+        broker.begin_delivery(sender, low, 0).unwrap();
+        broker.begin_delivery(sender, high, 0).unwrap();
+        let retries = broker.tick(10);
+        let ids: Vec<_> = retries
+            .into_iter()
+            .map(|event| match event {
+                DeliveryEvent::Deliver {
+                    message: Frame::Message { message_id, .. },
+                    ..
+                } => message_id,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![MessageId::new([62; 16]), MessageId::new([61; 16])]
+        );
+
+        let mut invalid = reliable_message(
+            MessageKind::Signal,
+            Destination::Peer(recipient),
+            63,
+            AckPolicy::Processed,
+            RetryPolicy::None,
+        );
+        if let Frame::Message { headers, .. } = &mut invalid {
+            headers.insert("priority".into(), HeaderValue::Unsigned(8));
+        }
+        assert_eq!(
+            broker.begin_delivery(sender, invalid, 0),
+            Err(Error::InvalidPriority)
+        );
     }
 }
