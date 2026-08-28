@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use bus_policy::{Action, Credentials, Policy};
-use bus_protocol::{Channel, ClientId, Headers, Namespace, PeerId};
+use bus_protocol::{Capabilities, Channel, ClientId, Headers, Namespace, PeerId};
 
 /// Claimed metadata advertised during peer setup.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -15,6 +15,8 @@ pub struct ClientHello {
     pub client_id: Option<ClientId>,
     /// Additional claimed metadata.
     pub headers: Headers,
+    /// Optional client capabilities offered for negotiation.
+    pub capabilities: Capabilities,
 }
 
 /// State associated with a connected peer.
@@ -26,11 +28,23 @@ pub struct Peer {
     pub credentials: Credentials,
     /// Claimed client metadata.
     pub hello: ClientHello,
+    /// Capabilities selected by the broker for this session.
+    pub capabilities: Capabilities,
+}
+
+/// The result of successfully creating a broker session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectedPeer {
+    /// The broker-assigned peer identity.
+    pub id: PeerId,
+    /// Capabilities selected from the client offer and broker support.
+    pub capabilities: Capabilities,
 }
 
 /// In-memory state for one broker instance.
 pub struct Broker<P> {
     policy: P,
+    capabilities: Capabilities,
     next_peer: u64,
     peers: BTreeMap<PeerId, Peer>,
     namespaces: BTreeMap<Namespace, PeerId>,
@@ -43,6 +57,20 @@ impl<P: Policy> Broker<P> {
     pub fn new(policy: P) -> Self {
         Self {
             policy,
+            capabilities: Capabilities::new(),
+            next_peer: 1,
+            peers: BTreeMap::new(),
+            namespaces: BTreeMap::new(),
+            subscriptions: BTreeMap::new(),
+        }
+    }
+
+    /// Creates an empty broker with the supplied optional capabilities.
+    #[must_use]
+    pub fn with_capabilities(policy: P, capabilities: Capabilities) -> Self {
+        Self {
+            policy,
+            capabilities,
             next_peer: 1,
             peers: BTreeMap::new(),
             namespaces: BTreeMap::new(),
@@ -56,21 +84,37 @@ impl<P: Policy> Broker<P> {
         credentials: Credentials,
         hello: ClientHello,
     ) -> Result<PeerId, Error> {
+        Ok(self.connect_session(credentials, hello)?.id)
+    }
+
+    /// Registers a peer and selects capabilities from its `HELLO` offer.
+    pub fn connect_session(
+        &mut self,
+        credentials: Credentials,
+        hello: ClientHello,
+    ) -> Result<ConnectedPeer, Error> {
+        validate_claimed_headers(&hello.headers)?;
         self.authorize(credentials, Action::Connect)?;
         let id = PeerId::new(self.next_peer);
         self.next_peer = self
             .next_peer
             .checked_add(1)
             .ok_or(Error::PeerIdExhausted)?;
+        let capabilities: Capabilities = self
+            .capabilities
+            .intersection(&hello.capabilities)
+            .cloned()
+            .collect();
         self.peers.insert(
             id,
             Peer {
                 id,
                 credentials,
                 hello,
+                capabilities: capabilities.clone(),
             },
         );
-        Ok(id)
+        Ok(ConnectedPeer { id, capabilities })
     }
 
     /// Removes a peer and releases all state owned by that connection.
@@ -105,6 +149,18 @@ impl<P: Policy> Broker<P> {
         let credentials = self.credentials(peer)?;
         self.authorize(credentials, Action::Subscribe(channel.clone()))?;
         self.subscriptions.entry(channel).or_default().insert(peer);
+        Ok(())
+    }
+
+    /// Removes a connected peer's subscription from a channel.
+    pub fn unsubscribe(&mut self, peer: PeerId, channel: &Channel) -> Result<(), Error> {
+        self.credentials(peer)?;
+        if let Some(peers) = self.subscriptions.get_mut(channel) {
+            peers.remove(&peer);
+            if peers.is_empty() {
+                self.subscriptions.remove(channel);
+            }
+        }
         Ok(())
     }
 
@@ -160,6 +216,8 @@ pub enum Error {
     Denied(Action),
     /// No further peer identifiers can be assigned.
     PeerIdExhausted,
+    /// A client attempted to claim broker-owned metadata.
+    ReservedHeader(String),
 }
 
 impl fmt::Display for Error {
@@ -174,8 +232,23 @@ impl fmt::Display for Error {
             }
             Self::Denied(_) => formatter.write_str("operation denied by policy"),
             Self::PeerIdExhausted => formatter.write_str("peer identifier space exhausted"),
+            Self::ReservedHeader(header) => {
+                write!(
+                    formatter,
+                    "claimed header {header} is reserved for the broker"
+                )
+            }
         }
     }
+}
+
+fn validate_claimed_headers(headers: &Headers) -> Result<(), Error> {
+    for name in headers.keys() {
+        if name.starts_with("auth.") || name.starts_with("broker.") || name.starts_with("peer.") {
+            return Err(Error::ReservedHeader(name.clone()));
+        }
+    }
+    Ok(())
 }
 
 impl std::error::Error for Error {}
@@ -228,5 +301,30 @@ mod tests {
         broker.subscribe(first, channel.clone()).unwrap();
         broker.subscribe(second, channel.clone()).unwrap();
         assert_eq!(broker.subscribers(&channel), vec![first, second]);
+    }
+
+    #[test]
+    fn capabilities_are_intersected_and_broker_headers_are_rejected() {
+        let mut broker = Broker::with_capabilities(AllowAll, ["fd-passing".into()].into());
+        let session = broker
+            .connect_session(
+                credentials(),
+                ClientHello {
+                    capabilities: ["fd-passing".into(), "other".into()].into(),
+                    ..ClientHello::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(session.capabilities, ["fd-passing".into()].into());
+        assert_eq!(broker.peer(session.id).unwrap().credentials.uid, 1000);
+
+        let error = broker.connect(
+            credentials(),
+            ClientHello {
+                headers: [("peer.uid".into(), bus_protocol::HeaderValue::Unsigned(0))].into(),
+                ..ClientHello::default()
+            },
+        );
+        assert!(matches!(error, Err(Error::ReservedHeader(header)) if header == "peer.uid"));
     }
 }
