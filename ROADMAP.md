@@ -13,7 +13,7 @@ layers. Checkboxes record repository status, not an estimated schedule.
   and a round-trippable codec.
 - [x] **M2 — Native broker alpha:** authenticated connections, handshake, and
   live namespace, peer, and channel routing.
-- [ ] **M3 — Reliable messaging beta:** requests, responses, acknowledgements,
+- [x] **M3 — Reliable messaging beta:** requests, responses, acknowledgements,
   deadlines, and explicit failure results.
 - [ ] **M4 — Secure native 1.0:** configurable policy, bounded resource use,
   observability, and release-quality operational documentation.
@@ -112,24 +112,24 @@ layers. Checkboxes record repository status, not an estimated schedule.
 
 **Milestone:** M3 — Reliable messaging beta.
 
-- [ ] Implement `SIGNAL`, `REQUEST`, and `RESPONSE` frames with stable message
+- [x] Implement `SIGNAL`, `REQUEST`, and `RESPONSE` frames with stable message
   and correlation IDs.
-- [ ] Implement `ACK_NONE`, `ACK_ACCEPTED`, `ACK_RECEIVED`, and `ACK_PROCESSED`.
-- [ ] Implement multicast acknowledgement requirements: `NONE`, `ANY`, `ALL`,
+- [x] Implement `ACK_NONE`, `ACK_ACCEPTED`, `ACK_RECEIVED`, and `ACK_PROCESSED`.
+- [x] Implement multicast acknowledgement requirements: `NONE`, `ANY`, `ALL`,
   and `MINIMUM(N)`.
-- [ ] Implement request routing policies: `EXACT`, `FIRST`, `FIRST_SUCCESS`, and `ALL`.
-- [ ] Enforce deadlines and return explicit `TIMEOUT`, `NO_RECIPIENT`,
+- [x] Implement request routing policies: `EXACT`, `FIRST`, `FIRST_SUCCESS`, and `ALL`.
+- [x] Enforce deadlines and return explicit `TIMEOUT`, `NO_RECIPIENT`,
   `RECIPIENT_DISCONNECTED`, and `DELIVERY_FAILED` outcomes.
-- [ ] Add broker-managed retry scheduling with bounded exponential backoff.
-- [ ] Retain one logical message ID across retries and provide bounded receiver-side deduplication support.
-- [ ] Document at-least-once delivery and the absence of exactly-once execution guarantees.
-- [ ] Add deterministic tests for timeout, retry, duplicate, and recipient-loss races.
+- [x] Add broker-managed retry scheduling with bounded exponential backoff.
+- [x] Retain one logical message ID across retries and provide bounded receiver-side deduplication support.
+- [x] Document at-least-once delivery and the absence of exactly-once execution guarantees.
+- [x] Add deterministic tests for timeout, retry, duplicate, and recipient-loss races.
 
 **Exit criteria**
 
-- [ ] A request completes with a response, a documented failure result, or a deadline.
-- [ ] Retried messages retain their ID and cannot silently claim exactly-once execution.
-- [ ] A slow or disconnected recipient cannot make an unrelated request wait indefinitely.
+- [x] A request completes with a response, a documented failure result, or a deadline.
+- [x] Retried messages retain their ID and cannot silently claim exactly-once execution.
+- [x] A slow or disconnected recipient cannot make an unrelated request wait indefinitely.
 
 ## Phase 5 — Policy, isolation, and operational safety
 

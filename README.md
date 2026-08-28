@@ -4,8 +4,9 @@
 
 The project is an early BUS/1 implementation. It establishes crate boundaries,
 the BUS/1-preview frame ABI and codec, authenticated native sessions, namespace
-and peer routing, filtered channels, and broker discovery state. FD passing,
-acknowledgement tracking, and production policy configuration are not implemented yet.
+and peer routing, filtered channels, broker discovery, requests, acknowledgements,
+deadlines, and bounded retries. FD passing and production policy configuration
+are not implemented yet.
 
 ## Run
 
@@ -26,7 +27,8 @@ The default socket is `/run/busd/busd.sock`; its parent directory must be manage
 ## Client status
 
 `bus-client` opens an authenticated native session, performs `HELLO`/`WELCOME`,
-supports claims, subscriptions, namespace resolution, and message delivery.
+supports claims, subscriptions, namespace resolution, message delivery,
+acknowledgements, requests, responses, and bounded receiver-side deduplication.
 
 See the [BUS/1-preview wire protocol](docs/wire-protocol.md) for the packet ABI.
 

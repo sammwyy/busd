@@ -18,7 +18,7 @@ starts with this 12-byte header:
 | Offset | Size | Field | Value |
 | --- | ---: | --- | --- |
 | 0 | 4 | magic | ASCII `BUS1` (`42 55 53 31`) |
-| 4 | 1 | version | `2` for BUS/1-preview |
+| 4 | 1 | version | `3` for BUS/1-preview |
 | 5 | 1 | kind | Frame kind below |
 | 6 | 2 | flags | Must be zero |
 | 8 | 4 | body length | Exact number of following bytes |
@@ -76,6 +76,8 @@ increasing by their complete binary encoding and are limited to 64.
 | 8 | `CONTROL_RESULT` | accepted control-operation tag |
 | 9 | `RESOLVE_NAMESPACE` | namespace |
 | 10 | `NAMESPACE_RESOLVED` | namespace and optional owner peer ID |
+| 11 | `ACKNOWLEDGE` | message ID and `RECEIVED` or `PROCESSED` stage |
+| 12 | `DELIVERY_RESULT` | message ID and broker delivery outcome |
 
 `HELLO` starts with one byte (`0` no client ID, `1` name follows), then headers
 and capabilities. `WELCOME` is `peer-id` then capabilities. `CLAIM` is a
@@ -110,6 +112,10 @@ native connection releases its peer, namespace claims, and subscriptions.
 | --- | --- |
 | message kind | `0 SIGNAL`, `1 REQUEST`, `2 RESPONSE` |
 | acknowledgement policy | `0 NONE`, `1 ACCEPTED`, `2 RECEIVED`, `3 PROCESSED` |
+| acknowledgement requirement | `0 NONE`, `1 ANY`, `2 ALL`, or `3` plus non-zero `u16 MINIMUM(N)` |
+| request policy | `0 EXACT`, `1 FIRST`, `2 FIRST_SUCCESS`, `3 ALL` |
+| deadline | relative `u32` milliseconds; zero means absent |
+| retry policy | `0 NONE`, or `1` plus initial `u32` backoff milliseconds and total-attempt `u8` |
 | destination selector | selector below |
 | message ID | `id` |
 | correlation ID | `id` |
@@ -123,10 +129,40 @@ plus client ID and a selection byte (`0 FIRST`, `1 ANY`, `2 ALL`). `FIRST` and
 preview `ANY` select the lowest matching peer ID; `ALL` selects every matching
 peer. Direct peer, namespace, and client-ID sends return `NO_RECIPIENT` when
 no peer matches. Publishing to an empty channel and broadcasting to no other
-peer succeed with no recipients. `SIGNAL` and
-`REQUEST` must use status `SUCCESS`; a `RESPONSE` may use any status. A response
-must have a non-zero correlation ID. The current statuses are `0 SUCCESS`, `1
+peer succeed with no recipients. `SIGNAL` and `REQUEST` must use status
+`SUCCESS`; a `RESPONSE` may use any status and must have a non-zero correlation
+ID. Requests require a non-zero deadline. `ACK_RECEIVED` and `ACK_PROCESSED`
+require both a non-zero deadline and a non-`NONE` acknowledgement requirement;
+`NONE` and `ACCEPTED` require `NONE`. Retry is valid for a request or for
+`RECEIVED` and `PROCESSED`. Non-request messages use `EXACT`; responses use
+neither deadline nor retry. The current statuses are `0 SUCCESS`, `1
 ERROR`, `2 UNSUPPORTED`, `3 DENIED`, `4 BUSY`, and `5 NOT_FOUND`.
+
+`ACKNOWLEDGE` names a delivered non-zero message ID and uses only `RECEIVED` or
+`PROCESSED`; `PROCESSED` also satisfies a `RECEIVED` requirement.
+`DELIVERY_RESULT` outcomes are `0 ACCEPTED`, `1 RECEIVED`, `2 PROCESSED`, `3
+TIMEOUT`, `4 NO_RECIPIENT`, `5 RECIPIENT_DISCONNECTED`, and `6 DELIVERY_FAILED`.
+They are broker-to-originator frames only.
+
+## Reliable delivery
+
+The broker computes deadlines from receipt using its scheduler clock. It returns
+`NO_RECIPIENT` when a request or required acknowledgement has no eligible
+recipient, `TIMEOUT` at the deadline, `RECIPIENT_DISCONNECTED` when a selected
+recipient disconnects before completion, and `DELIVERY_FAILED` after the
+bounded retry count is exhausted. Exponential retry retains the same logical
+message ID on every delivery attempt.
+
+`EXACT` completes a request with the selected recipient set, `FIRST` with the
+first response, `FIRST_SUCCESS` with the first successful response (or a
+failure after all selected recipients respond), and `ALL` after all selected
+recipients respond. A response is correlated by its correlation ID and is only
+accepted from a selected request recipient.
+
+Acknowledged retryable delivery is at-least-once. It does not provide
+exactly-once execution: a receiver may execute work and disconnect before its
+acknowledgement. Receivers can retain a bounded cache of message IDs to reduce
+duplicate side effects and should make important operations idempotent.
 
 ## Protocol errors and extension behavior
 
@@ -151,7 +187,9 @@ otherwise valid session. `RESOLVE_NAMESPACE` returns `NAMESPACE_RESOLVED` with
 the requested namespace and either marker `0` (unclaimed) or marker `1` plus a
 non-zero owner peer ID.
 
-`MESSAGE` delivery preserves the complete canonical message frame. Namespace
+`MESSAGE` delivery preserves the complete canonical message frame except that
+the broker adds the reserved unsigned `broker.sender` header while forwarding.
+Clients must not send `auth.`, `broker.`, or `peer.` message headers. Namespace
 delivery selects one provider, peer delivery selects one peer, channel delivery
 selects only matching subscribers, client-ID delivery follows its selection
 mode, and broadcast is authorized through the broker policy before selecting

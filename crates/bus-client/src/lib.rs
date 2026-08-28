@@ -5,6 +5,7 @@
 //!
 //! This crate provides the application-facing native connection and frame API.
 
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -73,6 +74,58 @@ impl ConnectOptions {
 impl Default for ConnectOptions {
     fn default() -> Self {
         Self::new("/run/busd/busd.sock")
+    }
+}
+
+/// A bounded receiver-side logical-message deduplication cache.
+///
+/// It helps applications make retried acknowledged messages idempotent, but it
+/// cannot establish exactly-once execution across process crashes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeduplicationCache {
+    capacity: usize,
+    order: VecDeque<MessageId>,
+    entries: BTreeSet<MessageId>,
+}
+
+impl DeduplicationCache {
+    /// Creates a cache that retains at most `capacity` message IDs.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            order: VecDeque::with_capacity(capacity),
+            entries: BTreeSet::new(),
+        }
+    }
+
+    /// Records `message_id` and returns `true` only when it was not retained already.
+    pub fn record(&mut self, message_id: MessageId) -> bool {
+        if self.entries.contains(&message_id) {
+            return false;
+        }
+        if self.capacity == 0 {
+            return true;
+        }
+        if self.order.len() == self.capacity {
+            let expired = self.order.pop_front().expect("cache is non-empty");
+            self.entries.remove(&expired);
+        }
+        self.order.push_back(message_id);
+        self.entries.insert(message_id);
+        true
+    }
+
+    /// Returns the number of retained logical message IDs.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Reports whether no logical message IDs are retained.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -380,5 +433,19 @@ mod tests {
         bus.disconnect().unwrap();
         assert!(matches!(server.join().unwrap(), Frame::Hello { .. }));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn deduplication_cache_is_bounded() {
+        let first = MessageId::new([1; 16]);
+        let second = MessageId::new([2; 16]);
+        let third = MessageId::new([3; 16]);
+        let mut cache = DeduplicationCache::new(2);
+        assert!(cache.record(first));
+        assert!(cache.record(second));
+        assert!(!cache.record(first));
+        assert!(cache.record(third));
+        assert_eq!(cache.len(), 2);
+        assert!(cache.record(first));
     }
 }

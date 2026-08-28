@@ -59,7 +59,8 @@ The current implementation is a scaffold, not a complete BUS/1 broker:
 - `bus-transport-unix` preserves bounded native packet boundaries below the
   BUS/1 API.
 - `busd` authenticates Unix peers, routes namespace, direct, client-ID, channel,
-  and authorized broadcast messages, and releases broker state on disconnect.
+  and authorized broadcast messages, manages in-flight request and acknowledged
+  delivery deadlines and retries, and releases broker state on disconnect.
 
 Do not expose raw native packets through an application API.
 

@@ -720,17 +720,15 @@ impl Frame {
                 headers,
                 payload,
             } => {
-                validate_message(
+                validate_delivery_options(
                     *kind,
                     *ack_policy,
                     *ack_requirement,
                     *request_policy,
                     *deadline_ms,
                     *retry,
-                    *message_id,
-                    *correlation_id,
-                    *status,
                 )?;
+                validate_message_identity(*kind, *message_id, *correlation_id, *status)?;
                 body.push(message_kind_tag(*kind));
                 body.push(ack_policy_tag(*ack_policy));
                 push_ack_requirement(&mut body, *ack_requirement)?;
@@ -844,17 +842,15 @@ impl Frame {
         let message_id = MessageId::new(reader.array_16()?);
         let correlation_id = MessageId::new(reader.array_16()?);
         let status = decode_status(reader.u8()?)?;
-        validate_message(
+        validate_delivery_options(
             kind,
             ack_policy,
             ack_requirement,
             request_policy,
             deadline_ms,
             retry,
-            message_id,
-            correlation_id,
-            status,
         )?;
+        validate_message_identity(kind, message_id, correlation_id, status)?;
         Ok(Self::Message {
             kind,
             ack_policy,
@@ -1323,20 +1319,14 @@ fn push_destination(output: &mut Vec<u8>, destination: &Destination) -> Result<(
     }
     Ok(())
 }
-fn validate_message(
+fn validate_delivery_options(
     kind: MessageKind,
     ack_policy: AckPolicy,
     ack_requirement: AckRequirement,
     request_policy: RequestPolicy,
     deadline_ms: u32,
     retry: RetryPolicy,
-    message_id: MessageId,
-    correlation_id: MessageId,
-    status: Status,
 ) -> Result<(), CodecError> {
-    if message_id.is_absent() {
-        return Err(CodecError::InvalidValue("message ID"));
-    }
     if matches!(ack_policy, AckPolicy::None | AckPolicy::Accepted)
         && ack_requirement != AckRequirement::None
     {
@@ -1351,6 +1341,7 @@ fn validate_message(
         return Err(CodecError::InvalidValue("acknowledgement deadline"));
     }
     if !matches!(retry, RetryPolicy::None)
+        && kind != MessageKind::Request
         && !matches!(ack_policy, AckPolicy::Received | AckPolicy::Processed)
     {
         return Err(CodecError::InvalidValue("retry acknowledgement policy"));
@@ -1358,19 +1349,30 @@ fn validate_message(
     if kind != MessageKind::Request && request_policy != RequestPolicy::Exact {
         return Err(CodecError::NonCanonical("non-request routing policy"));
     }
+    if kind == MessageKind::Request && deadline_ms == 0 {
+        return Err(CodecError::InvalidValue("request deadline"));
+    }
+    if kind == MessageKind::Response && (deadline_ms != 0 || !matches!(retry, RetryPolicy::None)) {
+        return Err(CodecError::NonCanonical("response delivery options"));
+    }
+    Ok(())
+}
+fn validate_message_identity(
+    kind: MessageKind,
+    message_id: MessageId,
+    correlation_id: MessageId,
+    status: Status,
+) -> Result<(), CodecError> {
+    if message_id.is_absent() {
+        return Err(CodecError::InvalidValue("message ID"));
+    }
     match kind {
         MessageKind::Response if correlation_id.is_absent() => {
             Err(CodecError::InvalidValue("response correlation ID"))
         }
-        MessageKind::Response if deadline_ms != 0 || !matches!(retry, RetryPolicy::None) => {
-            Err(CodecError::NonCanonical("response delivery options"))
-        }
         MessageKind::Response => Ok(()),
         _ if !correlation_id.is_absent() => {
             Err(CodecError::NonCanonical("non-response correlation ID"))
-        }
-        MessageKind::Request if deadline_ms == 0 => {
-            Err(CodecError::InvalidValue("request deadline"))
         }
         _ if status != Status::Success => Err(CodecError::InvalidValue("non-response status")),
         _ => Ok(()),

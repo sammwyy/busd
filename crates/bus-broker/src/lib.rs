@@ -361,7 +361,17 @@ impl<P: Policy> Broker<P> {
             return Err(Error::DuplicateMessage(*message_id));
         }
         let retry = *retry;
-        let recipients = self.route(sender, destination, headers)?;
+        let recipients = match self.route(sender, destination, headers) {
+            Ok(recipients) => recipients,
+            Err(Error::NoRecipient) => {
+                return Ok(vec![DeliveryEvent::Result {
+                    sender,
+                    message_id: *message_id,
+                    outcome: DeliveryOutcome::NoRecipient,
+                }]);
+            }
+            Err(error) => return Err(error),
+        };
         let recipients: BTreeSet<_> = recipients.into_iter().collect();
         if recipients.is_empty()
             && (*kind == MessageKind::Request
@@ -1180,9 +1190,7 @@ mod tests {
         Frame::Message {
             kind,
             ack_policy,
-            ack_requirement: if ack_policy == AckPolicy::None {
-                AckRequirement::None
-            } else if ack_policy == AckPolicy::Accepted {
+            ack_requirement: if matches!(ack_policy, AckPolicy::None | AckPolicy::Accepted) {
                 AckRequirement::None
             } else {
                 AckRequirement::All
