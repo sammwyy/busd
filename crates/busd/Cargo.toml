@@ -24,5 +24,8 @@ bus-policy = { path = "../bus-policy" }
 bus-protocol = { path = "../bus-protocol" }
 bus-transport-unix = { path = "../bus-transport-unix", optional = true }
 
+[dev-dependencies]
+bus-client = { path = "../bus-client" }
+
 [lints]
 workspace = true
