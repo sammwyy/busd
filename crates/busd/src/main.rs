@@ -7,9 +7,9 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use bus_broker::{Broker, ClientHello, Error as BrokerError};
+use bus_broker::{Broker, ClientHello, DeliveryEvent, Error as BrokerError};
 use bus_policy::{AllowAll, Credentials};
-use bus_protocol::{CodecError, Frame, FrameLimits, ProtocolErrorCode};
+use bus_protocol::{CodecError, Frame, FrameLimits, HeaderValue, ProtocolErrorCode};
 
 #[cfg(feature = "unix")]
 use bus_transport_unix::{Connection, Listener};
@@ -67,6 +67,18 @@ fn usage() -> io::Error {
 fn run_daemon(socket: PathBuf) -> io::Result<()> {
     let broker = Arc::new(Mutex::new(Broker::new(AllowAll)));
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
+    let scheduler_broker = Arc::clone(&broker);
+    let scheduler_sessions = Arc::clone(&sessions);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let events = match scheduler_broker.lock() {
+                Ok(mut broker) => broker.tick(now_ms()),
+                Err(_) => return,
+            };
+            let _ = dispatch_delivery_events(&scheduler_sessions, events, FrameLimits::default());
+        }
+    });
     let listener = Listener::bind(&socket)?;
     eprintln!("busd: listening on {}", listener.path().display());
     loop {
@@ -137,8 +149,17 @@ fn serve_peer(
 
     let result = dispatch_session(&peer, session.id, &broker, &sessions, limits);
     sessions.lock().map_err(lock_error)?.remove(&session.id);
-    let disconnect = broker.lock().map_err(lock_error)?.disconnect(session.id);
-    if let Err(error) = disconnect {
+    let disconnect = broker
+        .lock()
+        .map_err(lock_error)?
+        .disconnect_with_events(session.id);
+    let disconnect_events = match disconnect {
+        Ok(events) => events,
+        Err(error) => {
+            return Err(io::Error::other(error));
+        }
+    };
+    if let Err(error) = dispatch_delivery_events(&sessions, disconnect_events, limits) {
         return Err(io::Error::other(error));
     }
     result
@@ -214,41 +235,48 @@ fn dispatch_session(
                 )?;
                 continue;
             }
-            Frame::Message {
-                ref destination,
-                ref headers,
-                ..
-            } => {
-                let recipients =
-                    match broker
-                        .lock()
-                        .map_err(lock_error)?
-                        .route(peer_id, destination, headers)
-                    {
-                        Ok(recipients) => recipients,
-                        Err(error) => {
-                            peer.send_packet(
-                                &Frame::ProtocolError {
-                                    code: broker_error_code(&error),
-                                    message: error.to_string(),
-                                }
-                                .encode_with_limits(limits)
-                                .map_err(codec_io_error)?,
-                            )?;
-                            continue;
-                        }
-                    };
-                let outputs: Vec<_> = sessions
+            Frame::Message { .. } => {
+                let events = match broker.lock().map_err(lock_error)?.begin_delivery(
+                    peer_id,
+                    frame,
+                    now_ms(),
+                ) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        peer.send_packet(
+                            &Frame::ProtocolError {
+                                code: broker_error_code(&error),
+                                message: error.to_string(),
+                            }
+                            .encode_with_limits(limits)
+                            .map_err(codec_io_error)?,
+                        )?;
+                        continue;
+                    }
+                };
+                dispatch_delivery_events(sessions, events, limits)?;
+                continue;
+            }
+            Frame::Acknowledge { message_id, policy } => {
+                let events = match broker
                     .lock()
                     .map_err(lock_error)?
-                    .iter()
-                    .filter(|(id, _)| recipients.contains(id))
-                    .map(|(_, connection)| connection.try_clone())
-                    .collect::<io::Result<_>>()?;
-                let encoded = frame.encode_with_limits(limits).map_err(codec_io_error)?;
-                for connection in outputs {
-                    connection.send_packet(&encoded)?;
-                }
+                    .acknowledge(peer_id, message_id, policy)
+                {
+                    Ok(events) => events,
+                    Err(error) => {
+                        peer.send_packet(
+                            &Frame::ProtocolError {
+                                code: ProtocolErrorCode::InvalidState,
+                                message: error.to_string(),
+                            }
+                            .encode_with_limits(limits)
+                            .map_err(codec_io_error)?,
+                        )?;
+                        continue;
+                    }
+                };
+                dispatch_delivery_events(sessions, events, limits)?;
                 continue;
             }
             Frame::Hello { .. } => {
@@ -261,7 +289,8 @@ fn dispatch_session(
             Frame::Welcome { .. }
             | Frame::ProtocolError { .. }
             | Frame::ControlResult { .. }
-            | Frame::NamespaceResolved { .. } => {
+            | Frame::NamespaceResolved { .. }
+            | Frame::DeliveryResult { .. } => {
                 return reject(
                     peer,
                     ProtocolErrorCode::InvalidState,
@@ -271,6 +300,68 @@ fn dispatch_session(
         };
     }
     Ok(())
+}
+
+#[cfg(feature = "unix")]
+fn dispatch_delivery_events(
+    sessions: &Arc<Mutex<BTreeMap<bus_protocol::PeerId, Connection>>>,
+    events: Vec<DeliveryEvent>,
+    limits: FrameLimits,
+) -> io::Result<()> {
+    for event in events {
+        let (recipients, frame) = match event {
+            DeliveryEvent::Deliver {
+                sender,
+                recipients,
+                mut message,
+            } => {
+                if let Frame::Message { headers, .. } = &mut message {
+                    headers.insert("broker.sender".into(), HeaderValue::Unsigned(sender.get()));
+                }
+                (recipients, message)
+            }
+            DeliveryEvent::Result {
+                sender,
+                message_id,
+                outcome,
+            } => (
+                vec![sender],
+                Frame::DeliveryResult {
+                    message_id,
+                    outcome,
+                },
+            ),
+        };
+        let packet = frame.encode_with_limits(limits).map_err(codec_io_error)?;
+        let outputs: Vec<_> = sessions
+            .lock()
+            .map_err(lock_error)?
+            .iter()
+            .filter(|(id, _)| recipients.contains(id))
+            .map(|(_, connection)| connection.try_clone())
+            .collect::<io::Result<_>>()?;
+        for output in outputs {
+            if let Err(error) = output.send_packet(&packet) {
+                if !matches!(
+                    error.kind(),
+                    io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                ) {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "unix")]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[cfg(feature = "unix")]

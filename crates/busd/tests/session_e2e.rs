@@ -145,6 +145,10 @@ fn message(destination: Destination, payload: &[u8]) -> Frame {
     Frame::Message {
         kind: MessageKind::Signal,
         ack_policy: AckPolicy::None,
+        ack_requirement: bus_client::AckRequirement::None,
+        request_policy: bus_client::RequestPolicy::Exact,
+        deadline_ms: 0,
+        retry: bus_client::RetryPolicy::None,
         destination,
         message_id: MessageId::new([7; 16]),
         correlation_id: MessageId::absent(),

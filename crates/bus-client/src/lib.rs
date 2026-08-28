@@ -189,6 +189,53 @@ impl Bus {
         self.send_frame(message)
     }
 
+    /// Confirms that this peer received or processed a routed logical message.
+    pub fn acknowledge(&self, message_id: MessageId, policy: AckPolicy) -> Result<(), Error> {
+        self.send_frame(&Frame::Acknowledge { message_id, policy })
+    }
+
+    /// Sends a request and waits for its correlated response or terminal delivery outcome.
+    pub fn request(&self, request: &Frame) -> Result<Frame, Error> {
+        let Frame::Message {
+            kind: MessageKind::Request,
+            message_id,
+            ..
+        } = request
+        else {
+            return Err(Error::Handshake("request requires a REQUEST message"));
+        };
+        self.send_message(request)?;
+        loop {
+            match self.receive_frame()? {
+                Some(
+                    response @ Frame::Message {
+                        kind: MessageKind::Response,
+                        correlation_id,
+                        ..
+                    },
+                ) if correlation_id == *message_id => return Ok(response),
+                Some(Frame::DeliveryResult {
+                    message_id: result_id,
+                    outcome,
+                }) if result_id == *message_id => match outcome {
+                    DeliveryOutcome::Accepted
+                    | DeliveryOutcome::Received
+                    | DeliveryOutcome::Processed => {}
+                    _ => return Err(Error::Delivery(outcome)),
+                },
+                Some(Frame::ProtocolError { code, message }) => {
+                    return Err(Error::Rejected { code, message });
+                }
+                Some(_) => {
+                    return Err(Error::Handshake(
+                        "broker sent an unrelated frame during request",
+                    ));
+                }
+                None => return Err(Error::Handshake("broker disconnected during request")),
+            }
+        }
+    }
+
     /// Receives and decodes one BUS/1-preview frame.
     ///
     /// Returns `None` when the broker disconnects.
@@ -237,6 +284,8 @@ pub enum Error {
         /// Diagnostic text supplied by the broker.
         message: String,
     },
+    /// The broker completed delivery without an application response.
+    Delivery(DeliveryOutcome),
 }
 
 impl fmt::Display for Error {
@@ -248,6 +297,7 @@ impl fmt::Display for Error {
             Self::Rejected { code, message } => {
                 write!(formatter, "broker rejected handshake ({code:?}): {message}")
             }
+            Self::Delivery(outcome) => write!(formatter, "broker delivery failed: {outcome:?}"),
         }
     }
 }
@@ -257,7 +307,7 @@ impl std::error::Error for Error {
         match self {
             Self::Transport(error) => Some(error),
             Self::Codec(error) => Some(error),
-            Self::Handshake(_) | Self::Rejected { .. } => None,
+            Self::Handshake(_) | Self::Rejected { .. } | Self::Delivery(_) => None,
         }
     }
 }

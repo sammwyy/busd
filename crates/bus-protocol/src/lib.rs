@@ -7,7 +7,7 @@ use std::fmt;
 use std::str::FromStr;
 
 const MAGIC: [u8; 4] = *b"BUS1";
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const HEADER_SIZE: usize = 12;
 const MAX_NAME_LENGTH: usize = 255;
 
@@ -214,6 +214,65 @@ pub enum AckPolicy {
     Processed,
 }
 
+/// The receiver cardinality required for an acknowledgement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AckRequirement {
+    /// No receiver acknowledgement is required.
+    None,
+    /// One selected recipient must acknowledge.
+    Any,
+    /// Every selected recipient must acknowledge.
+    All,
+    /// At least this many selected recipients must acknowledge.
+    Minimum(u16),
+}
+
+/// The policy used to complete a request with one or more recipients.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestPolicy {
+    /// Require the response from the exactly selected recipient set.
+    Exact,
+    /// Complete with the first response.
+    First,
+    /// Complete with the first successful response, or a failure once all reply.
+    FirstSuccess,
+    /// Complete after every selected recipient responds.
+    All,
+}
+
+/// A bounded broker-managed retry schedule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetryPolicy {
+    /// Do not retry delivery.
+    None,
+    /// Retry up to `max_attempts` total attempts using exponential backoff.
+    Exponential {
+        /// The initial delay before the second attempt, in milliseconds.
+        initial_backoff_ms: u32,
+        /// The maximum number of delivery attempts, including the initial one.
+        max_attempts: u8,
+    },
+}
+
+/// A terminal broker delivery outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeliveryOutcome {
+    /// The broker accepted a message with `ACK_ACCEPTED`.
+    Accepted,
+    /// The required recipient set acknowledged receipt.
+    Received,
+    /// The required recipient set acknowledged processing.
+    Processed,
+    /// The message deadline elapsed.
+    Timeout,
+    /// No eligible recipient was available when the message was accepted.
+    NoRecipient,
+    /// A required recipient disconnected before completion.
+    RecipientDisconnected,
+    /// Delivery exhausted its configured retry attempts.
+    DeliveryFailed,
+}
+
 /// A message destination selector.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Destination {
@@ -353,6 +412,14 @@ pub enum Frame {
         kind: MessageKind,
         /// Requested delivery acknowledgement.
         ack_policy: AckPolicy,
+        /// The recipient cardinality required by `ack_policy`.
+        ack_requirement: AckRequirement,
+        /// The routing policy used when this is a request.
+        request_policy: RequestPolicy,
+        /// Relative deadline in milliseconds; zero means no deadline.
+        deadline_ms: u32,
+        /// Broker-managed retry policy.
+        retry: RetryPolicy,
         /// The intended recipients.
         destination: Destination,
         /// Stable logical message identifier.
@@ -365,6 +432,20 @@ pub enum Frame {
         headers: Headers,
         /// Opaque application payload.
         payload: Vec<u8>,
+    },
+    /// Confirms receipt or processing of a routed logical message.
+    Acknowledge {
+        /// The logical message being acknowledged.
+        message_id: MessageId,
+        /// The completed acknowledgement stage.
+        policy: AckPolicy,
+    },
+    /// Reports a broker-managed delivery outcome to the original sender.
+    DeliveryResult {
+        /// The logical message that completed or failed.
+        message_id: MessageId,
+        /// The resulting outcome.
+        outcome: DeliveryOutcome,
     },
     /// Reports a protocol failure to a peer.
     ProtocolError {
@@ -571,6 +652,8 @@ impl Frame {
             8 => Self::decode_control_result(&mut reader),
             9 => Self::decode_resolve_namespace(&mut reader),
             10 => Self::decode_namespace_resolved(&mut reader),
+            11 => Self::decode_acknowledge(&mut reader),
+            12 => Self::decode_delivery_result(&mut reader),
             kind => return Err(CodecError::UnknownFrameKind(kind)),
         }?;
         if !reader.is_empty() {
@@ -626,6 +709,10 @@ impl Frame {
             Self::Message {
                 kind,
                 ack_policy,
+                ack_requirement,
+                request_policy,
+                deadline_ms,
+                retry,
                 destination,
                 message_id,
                 correlation_id,
@@ -633,9 +720,23 @@ impl Frame {
                 headers,
                 payload,
             } => {
-                validate_message(*kind, *message_id, *correlation_id, *status)?;
+                validate_message(
+                    *kind,
+                    *ack_policy,
+                    *ack_requirement,
+                    *request_policy,
+                    *deadline_ms,
+                    *retry,
+                    *message_id,
+                    *correlation_id,
+                    *status,
+                )?;
                 body.push(message_kind_tag(*kind));
                 body.push(ack_policy_tag(*ack_policy));
+                push_ack_requirement(&mut body, *ack_requirement)?;
+                body.push(request_policy_tag(*request_policy));
+                push_u32(&mut body, *deadline_ms);
+                push_retry_policy(&mut body, *retry)?;
                 push_destination(&mut body, destination)?;
                 body.extend_from_slice(&message_id.as_bytes());
                 body.extend_from_slice(&correlation_id.as_bytes());
@@ -643,6 +744,27 @@ impl Frame {
                 push_headers(&mut body, headers, limits)?;
                 push_binary(&mut body, payload)?;
                 6
+            }
+            Self::Acknowledge { message_id, policy } => {
+                if message_id.is_absent()
+                    || !matches!(policy, AckPolicy::Received | AckPolicy::Processed)
+                {
+                    return Err(CodecError::InvalidValue("acknowledgement"));
+                }
+                body.extend_from_slice(&message_id.as_bytes());
+                body.push(ack_policy_tag(*policy));
+                11
+            }
+            Self::DeliveryResult {
+                message_id,
+                outcome,
+            } => {
+                if message_id.is_absent() {
+                    return Err(CodecError::InvalidValue("message ID"));
+                }
+                body.extend_from_slice(&message_id.as_bytes());
+                body.push(delivery_outcome_tag(*outcome));
+                12
             }
             Self::ProtocolError { code, message } => {
                 body.push(protocol_error_code_tag(*code));
@@ -714,20 +836,56 @@ impl Frame {
     fn decode_message(reader: &mut Reader<'_>, limits: FrameLimits) -> Result<Self, CodecError> {
         let kind = decode_message_kind(reader.u8()?)?;
         let ack_policy = decode_ack_policy(reader.u8()?)?;
+        let ack_requirement = reader.ack_requirement()?;
+        let request_policy = decode_request_policy(reader.u8()?)?;
+        let deadline_ms = reader.u32()?;
+        let retry = reader.retry_policy()?;
         let destination = reader.destination()?;
         let message_id = MessageId::new(reader.array_16()?);
         let correlation_id = MessageId::new(reader.array_16()?);
         let status = decode_status(reader.u8()?)?;
-        validate_message(kind, message_id, correlation_id, status)?;
+        validate_message(
+            kind,
+            ack_policy,
+            ack_requirement,
+            request_policy,
+            deadline_ms,
+            retry,
+            message_id,
+            correlation_id,
+            status,
+        )?;
         Ok(Self::Message {
             kind,
             ack_policy,
+            ack_requirement,
+            request_policy,
+            deadline_ms,
+            retry,
             destination,
             message_id,
             correlation_id,
             status,
             headers: reader.headers(limits)?,
             payload: reader.binary()?,
+        })
+    }
+    fn decode_acknowledge(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let message_id = MessageId::new(reader.array_16()?);
+        let policy = decode_ack_policy(reader.u8()?)?;
+        if message_id.is_absent() || !matches!(policy, AckPolicy::Received | AckPolicy::Processed) {
+            return Err(CodecError::InvalidValue("acknowledgement"));
+        }
+        Ok(Self::Acknowledge { message_id, policy })
+    }
+    fn decode_delivery_result(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let message_id = MessageId::new(reader.array_16()?);
+        if message_id.is_absent() {
+            return Err(CodecError::InvalidValue("message ID"));
+        }
+        Ok(Self::DeliveryResult {
+            message_id,
+            outcome: decode_delivery_outcome(reader.u8()?)?,
         })
     }
     fn decode_protocol_error(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
@@ -908,6 +1066,40 @@ impl<'a> Reader<'a> {
         }
         Ok(filters)
     }
+    fn ack_requirement(&mut self) -> Result<AckRequirement, CodecError> {
+        match self.u8()? {
+            0 => Ok(AckRequirement::None),
+            1 => Ok(AckRequirement::Any),
+            2 => Ok(AckRequirement::All),
+            3 => {
+                let minimum = self.u16()?;
+                if minimum == 0 {
+                    Err(CodecError::InvalidValue("acknowledgement minimum"))
+                } else {
+                    Ok(AckRequirement::Minimum(minimum))
+                }
+            }
+            _ => Err(CodecError::InvalidValue("acknowledgement requirement")),
+        }
+    }
+    fn retry_policy(&mut self) -> Result<RetryPolicy, CodecError> {
+        match self.u8()? {
+            0 => Ok(RetryPolicy::None),
+            1 => {
+                let initial_backoff_ms = self.u32()?;
+                let max_attempts = self.u8()?;
+                if initial_backoff_ms == 0 || max_attempts < 2 {
+                    Err(CodecError::InvalidValue("retry policy"))
+                } else {
+                    Ok(RetryPolicy::Exponential {
+                        initial_backoff_ms,
+                        max_attempts,
+                    })
+                }
+            }
+            _ => Err(CodecError::InvalidValue("retry policy")),
+        }
+    }
     fn destination(&mut self) -> Result<Destination, CodecError> {
         match self.u8()? {
             0 => Ok(Destination::Broker),
@@ -961,6 +1153,36 @@ fn push_binary(output: &mut Vec<u8>, value: &[u8]) -> Result<(), CodecError> {
         u32::try_from(value.len()).map_err(|_| CodecError::LimitExceeded("binary length"))?;
     push_u32(output, length);
     output.extend_from_slice(value);
+    Ok(())
+}
+fn push_ack_requirement(output: &mut Vec<u8>, value: AckRequirement) -> Result<(), CodecError> {
+    match value {
+        AckRequirement::None => output.push(0),
+        AckRequirement::Any => output.push(1),
+        AckRequirement::All => output.push(2),
+        AckRequirement::Minimum(minimum) if minimum != 0 => {
+            output.push(3);
+            push_u16(output, minimum);
+        }
+        AckRequirement::Minimum(_) => {
+            return Err(CodecError::InvalidValue("acknowledgement minimum"));
+        }
+    }
+    Ok(())
+}
+fn push_retry_policy(output: &mut Vec<u8>, value: RetryPolicy) -> Result<(), CodecError> {
+    match value {
+        RetryPolicy::None => output.push(0),
+        RetryPolicy::Exponential {
+            initial_backoff_ms,
+            max_attempts,
+        } if initial_backoff_ms != 0 && max_attempts >= 2 => {
+            output.push(1);
+            push_u32(output, initial_backoff_ms);
+            output.push(max_attempts);
+        }
+        RetryPolicy::Exponential { .. } => return Err(CodecError::InvalidValue("retry policy")),
+    }
     Ok(())
 }
 fn push_value(output: &mut Vec<u8>, value: &HeaderValue) -> Result<(), CodecError> {
@@ -1103,6 +1325,11 @@ fn push_destination(output: &mut Vec<u8>, destination: &Destination) -> Result<(
 }
 fn validate_message(
     kind: MessageKind,
+    ack_policy: AckPolicy,
+    ack_requirement: AckRequirement,
+    request_policy: RequestPolicy,
+    deadline_ms: u32,
+    retry: RetryPolicy,
     message_id: MessageId,
     correlation_id: MessageId,
     status: Status,
@@ -1110,13 +1337,40 @@ fn validate_message(
     if message_id.is_absent() {
         return Err(CodecError::InvalidValue("message ID"));
     }
+    if matches!(ack_policy, AckPolicy::None | AckPolicy::Accepted)
+        && ack_requirement != AckRequirement::None
+    {
+        return Err(CodecError::NonCanonical("acknowledgement requirement"));
+    }
+    if matches!(ack_policy, AckPolicy::Received | AckPolicy::Processed)
+        && ack_requirement == AckRequirement::None
+    {
+        return Err(CodecError::InvalidValue("acknowledgement requirement"));
+    }
+    if matches!(ack_policy, AckPolicy::Received | AckPolicy::Processed) && deadline_ms == 0 {
+        return Err(CodecError::InvalidValue("acknowledgement deadline"));
+    }
+    if !matches!(retry, RetryPolicy::None)
+        && !matches!(ack_policy, AckPolicy::Received | AckPolicy::Processed)
+    {
+        return Err(CodecError::InvalidValue("retry acknowledgement policy"));
+    }
+    if kind != MessageKind::Request && request_policy != RequestPolicy::Exact {
+        return Err(CodecError::NonCanonical("non-request routing policy"));
+    }
     match kind {
         MessageKind::Response if correlation_id.is_absent() => {
             Err(CodecError::InvalidValue("response correlation ID"))
         }
+        MessageKind::Response if deadline_ms != 0 || !matches!(retry, RetryPolicy::None) => {
+            Err(CodecError::NonCanonical("response delivery options"))
+        }
         MessageKind::Response => Ok(()),
         _ if !correlation_id.is_absent() => {
             Err(CodecError::NonCanonical("non-response correlation ID"))
+        }
+        MessageKind::Request if deadline_ms == 0 => {
+            Err(CodecError::InvalidValue("request deadline"))
         }
         _ if status != Status::Success => Err(CodecError::InvalidValue("non-response status")),
         _ => Ok(()),
@@ -1135,6 +1389,25 @@ fn ack_policy_tag(value: AckPolicy) -> u8 {
         AckPolicy::Accepted => 1,
         AckPolicy::Received => 2,
         AckPolicy::Processed => 3,
+    }
+}
+fn request_policy_tag(value: RequestPolicy) -> u8 {
+    match value {
+        RequestPolicy::Exact => 0,
+        RequestPolicy::First => 1,
+        RequestPolicy::FirstSuccess => 2,
+        RequestPolicy::All => 3,
+    }
+}
+fn delivery_outcome_tag(value: DeliveryOutcome) -> u8 {
+    match value {
+        DeliveryOutcome::Accepted => 0,
+        DeliveryOutcome::Received => 1,
+        DeliveryOutcome::Processed => 2,
+        DeliveryOutcome::Timeout => 3,
+        DeliveryOutcome::NoRecipient => 4,
+        DeliveryOutcome::RecipientDisconnected => 5,
+        DeliveryOutcome::DeliveryFailed => 6,
     }
 }
 fn status_tag(value: Status) -> u8 {
@@ -1187,6 +1460,27 @@ fn decode_ack_policy(value: u8) -> Result<AckPolicy, CodecError> {
         2 => Ok(AckPolicy::Received),
         3 => Ok(AckPolicy::Processed),
         _ => Err(CodecError::InvalidValue("acknowledgement policy")),
+    }
+}
+fn decode_request_policy(value: u8) -> Result<RequestPolicy, CodecError> {
+    match value {
+        0 => Ok(RequestPolicy::Exact),
+        1 => Ok(RequestPolicy::First),
+        2 => Ok(RequestPolicy::FirstSuccess),
+        3 => Ok(RequestPolicy::All),
+        _ => Err(CodecError::InvalidValue("request routing policy")),
+    }
+}
+fn decode_delivery_outcome(value: u8) -> Result<DeliveryOutcome, CodecError> {
+    match value {
+        0 => Ok(DeliveryOutcome::Accepted),
+        1 => Ok(DeliveryOutcome::Received),
+        2 => Ok(DeliveryOutcome::Processed),
+        3 => Ok(DeliveryOutcome::Timeout),
+        4 => Ok(DeliveryOutcome::NoRecipient),
+        5 => Ok(DeliveryOutcome::RecipientDisconnected),
+        6 => Ok(DeliveryOutcome::DeliveryFailed),
+        _ => Err(CodecError::InvalidValue("delivery outcome")),
     }
 }
 fn decode_status(value: u8) -> Result<Status, CodecError> {
@@ -1269,7 +1563,7 @@ mod tests {
             capabilities: ["alpha".into()].into(),
         };
         let expected = [
-            0x42, 0x55, 0x53, 0x31, 2, 1, 0, 0, 0, 0, 0, 32, 1, 0, 3, b'a', b'p', b'p', 0, 1, 0, 7,
+            0x42, 0x55, 0x53, 0x31, 3, 1, 0, 0, 0, 0, 0, 32, 1, 0, 3, b'a', b'p', b'p', 0, 1, 0, 7,
             b'v', b'e', b'r', b's', b'i', b'o', b'n', 0, 0, 3, b'o', b'n', b'e', 0, 1, 0, 5, b'a',
             b'l', b'p', b'h', b'a',
         ];
@@ -1281,6 +1575,10 @@ mod tests {
         let frame = Frame::Message {
             kind: MessageKind::Signal,
             ack_policy: AckPolicy::None,
+            ack_requirement: AckRequirement::None,
+            request_policy: RequestPolicy::Exact,
+            deadline_ms: 0,
+            retry: RetryPolicy::None,
             destination: Destination::Namespace(Namespace::parse("bus://svc").unwrap()),
             message_id: message_id(1),
             correlation_id: MessageId::absent(),
@@ -1289,9 +1587,10 @@ mod tests {
             payload: b"abc".to_vec(),
         };
         let expected = [
-            0x42, 0x55, 0x53, 0x31, 2, 6, 0, 0, 0, 0, 0, 56, 0, 0, 2, 0, 9, b'b', b'u', b's', b':',
-            b'/', b'/', b's', b'v', b'c', 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, b'a', b'b', b'c',
+            0x42, 0x55, 0x53, 0x31, 3, 6, 0, 0, 0, 0, 0, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 9,
+            b'b', b'u', b's', b':', b'/', b'/', b's', b'v', b'c', 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+            11, 12, 13, 14, 15, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 3, b'a', b'b', b'c',
         ];
         assert_eq!(frame.encode().unwrap(), expected);
         assert_eq!(Frame::decode(&expected).unwrap(), frame);
@@ -1433,6 +1732,10 @@ mod tests {
         let frame = Frame::Message {
             kind: MessageKind::Signal,
             ack_policy: AckPolicy::None,
+            ack_requirement: AckRequirement::None,
+            request_policy: RequestPolicy::Exact,
+            deadline_ms: 0,
+            retry: RetryPolicy::None,
             destination: Destination::ClientId {
                 client_id: ClientId::parse("worker").unwrap(),
                 selection: ClientSelection::All,
@@ -1451,6 +1754,10 @@ mod tests {
         let frame = Frame::Message {
             kind: MessageKind::Response,
             ack_policy: AckPolicy::None,
+            ack_requirement: AckRequirement::None,
+            request_policy: RequestPolicy::Exact,
+            deadline_ms: 0,
+            retry: RetryPolicy::None,
             destination: Destination::Peer(PeerId::new(4)),
             message_id: message_id(9),
             correlation_id: message_id(3),
@@ -1478,6 +1785,10 @@ mod tests {
             let frame = Frame::Message {
                 kind: MessageKind::Signal,
                 ack_policy: AckPolicy::Accepted,
+                ack_requirement: AckRequirement::None,
+                request_policy: RequestPolicy::Exact,
+                deadline_ms: 0,
+                retry: RetryPolicy::None,
                 destination: Destination::Channel(Channel::parse("events").unwrap()),
                 message_id: message_id(4),
                 correlation_id: MessageId::absent(),

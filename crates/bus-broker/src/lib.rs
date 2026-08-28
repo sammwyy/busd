@@ -2,13 +2,14 @@
 #![warn(missing_docs)]
 //! Transport-independent broker state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use bus_policy::{Action, Credentials, Policy};
 use bus_protocol::{
-    Capabilities, Channel, ClientId, ClientSelection, Destination, HeaderFilter, HeaderValue,
-    Headers, Namespace, PeerId,
+    AckPolicy, AckRequirement, Capabilities, Channel, ClientId, ClientSelection, DeliveryOutcome,
+    Destination, Frame, HeaderFilter, HeaderValue, Headers, MessageId, MessageKind, Namespace,
+    PeerId, RequestPolicy, RetryPolicy, Status,
 };
 
 /// Claimed metadata advertised during peer setup.
@@ -52,7 +53,43 @@ pub struct Broker<P> {
     peers: BTreeMap<PeerId, Peer>,
     namespaces: BTreeMap<Namespace, PeerId>,
     subscriptions: BTreeMap<Channel, BTreeMap<PeerId, Vec<HeaderFilter>>>,
+    deliveries: BTreeMap<MessageId, PendingDelivery>,
     events: Vec<LifecycleEvent>,
+}
+
+struct PendingDelivery {
+    sender: PeerId,
+    message: Frame,
+    recipients: BTreeSet<PeerId>,
+    acknowledgements: BTreeSet<PeerId>,
+    responses: BTreeMap<PeerId, Frame>,
+    acknowledgement_complete: bool,
+    deadline_ms: u64,
+    attempts: u8,
+    next_retry_ms: Option<u64>,
+}
+
+/// Work the daemon must perform after a broker reliability transition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeliveryEvent {
+    /// Forward a canonical message to each listed recipient.
+    Deliver {
+        /// Authenticated origin of the forwarded message.
+        sender: PeerId,
+        /// Recipients selected by the broker.
+        recipients: Vec<PeerId>,
+        /// The message to forward without changing its logical ID.
+        message: Frame,
+    },
+    /// Return a terminal or acknowledgement outcome to the originating peer.
+    Result {
+        /// Original sender.
+        sender: PeerId,
+        /// Stable logical message identifier.
+        message_id: MessageId,
+        /// Broker outcome.
+        outcome: DeliveryOutcome,
+    },
 }
 
 impl<P: Policy> Broker<P> {
@@ -66,6 +103,7 @@ impl<P: Policy> Broker<P> {
             peers: BTreeMap::new(),
             namespaces: BTreeMap::new(),
             subscriptions: BTreeMap::new(),
+            deliveries: BTreeMap::new(),
             events: Vec::new(),
         }
     }
@@ -80,6 +118,7 @@ impl<P: Policy> Broker<P> {
             peers: BTreeMap::new(),
             namespaces: BTreeMap::new(),
             subscriptions: BTreeMap::new(),
+            deliveries: BTreeMap::new(),
             events: Vec::new(),
         }
     }
@@ -291,6 +330,283 @@ impl<P: Policy> Broker<P> {
         }
     }
 
+    /// Begins routing one logical message and records any required reliability state.
+    pub fn begin_delivery(
+        &mut self,
+        sender: PeerId,
+        message: Frame,
+        now_ms: u64,
+    ) -> Result<Vec<DeliveryEvent>, Error> {
+        let Frame::Message {
+            kind,
+            ack_policy,
+            ack_requirement,
+            request_policy: _,
+            deadline_ms,
+            retry,
+            destination,
+            message_id,
+            headers,
+            ..
+        } = &message
+        else {
+            return Err(Error::InvalidDelivery);
+        };
+        self.credentials(sender)?;
+        validate_message_headers(headers)?;
+        if *kind == MessageKind::Response {
+            return self.complete_response(sender, message);
+        }
+        if self.deliveries.contains_key(message_id) {
+            return Err(Error::DuplicateMessage(*message_id));
+        }
+        let retry = *retry;
+        let recipients = self.route(sender, destination, headers)?;
+        let recipients: BTreeSet<_> = recipients.into_iter().collect();
+        if recipients.is_empty()
+            && (*kind == MessageKind::Request
+                || matches!(ack_policy, AckPolicy::Received | AckPolicy::Processed))
+        {
+            return Ok(vec![DeliveryEvent::Result {
+                sender,
+                message_id: *message_id,
+                outcome: DeliveryOutcome::NoRecipient,
+            }]);
+        }
+        if !requirement_possible(*ack_requirement, recipients.len()) {
+            return Ok(vec![DeliveryEvent::Result {
+                sender,
+                message_id: *message_id,
+                outcome: DeliveryOutcome::NoRecipient,
+            }]);
+        }
+
+        let mut events = vec![DeliveryEvent::Deliver {
+            sender,
+            recipients: recipients.iter().copied().collect(),
+            message: message.clone(),
+        }];
+        if *ack_policy == AckPolicy::Accepted {
+            events.push(DeliveryEvent::Result {
+                sender,
+                message_id: *message_id,
+                outcome: DeliveryOutcome::Accepted,
+            });
+        }
+        let tracked = *kind == MessageKind::Request
+            || matches!(ack_policy, AckPolicy::Received | AckPolicy::Processed);
+        if tracked {
+            let deadline_ms = now_ms
+                .checked_add(u64::from(*deadline_ms))
+                .ok_or(Error::DeadlineOverflow)?;
+            self.deliveries.insert(
+                *message_id,
+                PendingDelivery {
+                    sender,
+                    message,
+                    recipients,
+                    acknowledgements: BTreeSet::new(),
+                    responses: BTreeMap::new(),
+                    acknowledgement_complete: false,
+                    deadline_ms,
+                    attempts: 1,
+                    next_retry_ms: retry_next(retry, now_ms, 1),
+                },
+            );
+        }
+        Ok(events)
+    }
+
+    /// Records a receiver acknowledgement and emits an outcome when its requirement is met.
+    pub fn acknowledge(
+        &mut self,
+        peer: PeerId,
+        message_id: MessageId,
+        policy: AckPolicy,
+    ) -> Result<Vec<DeliveryEvent>, Error> {
+        self.credentials(peer)?;
+        let pending = self
+            .deliveries
+            .get_mut(&message_id)
+            .ok_or(Error::UnknownDelivery(message_id))?;
+        let Frame::Message {
+            kind,
+            ack_policy,
+            ack_requirement,
+            ..
+        } = &pending.message
+        else {
+            return Err(Error::InvalidDelivery);
+        };
+        if !pending.recipients.contains(&peer) || !acknowledgement_satisfies(*ack_policy, policy) {
+            return Err(Error::UnexpectedAcknowledgement(message_id));
+        }
+        pending.acknowledgements.insert(peer);
+        if pending.acknowledgement_complete
+            || !requirement_met(
+                *ack_requirement,
+                pending.acknowledgements.len(),
+                pending.recipients.len(),
+            )
+        {
+            return Ok(Vec::new());
+        }
+        pending.acknowledgement_complete = true;
+        let outcome = match ack_policy {
+            AckPolicy::Received => DeliveryOutcome::Received,
+            AckPolicy::Processed => DeliveryOutcome::Processed,
+            AckPolicy::None | AckPolicy::Accepted => {
+                return Err(Error::UnexpectedAcknowledgement(message_id));
+            }
+        };
+        let sender = pending.sender;
+        if *kind != MessageKind::Request {
+            self.deliveries.remove(&message_id);
+        }
+        Ok(vec![DeliveryEvent::Result {
+            sender,
+            message_id,
+            outcome,
+        }])
+    }
+
+    /// Advances deadlines and bounded retry schedules using a caller-provided monotonic clock.
+    pub fn tick(&mut self, now_ms: u64) -> Vec<DeliveryEvent> {
+        let ids: Vec<_> = self.deliveries.keys().copied().collect();
+        let mut events = Vec::new();
+        for message_id in ids {
+            let Some(pending) = self.deliveries.get(&message_id) else {
+                continue;
+            };
+            if now_ms >= pending.deadline_ms {
+                let sender = pending.sender;
+                self.deliveries.remove(&message_id);
+                events.push(DeliveryEvent::Result {
+                    sender,
+                    message_id,
+                    outcome: DeliveryOutcome::Timeout,
+                });
+                continue;
+            }
+            let Some(next_retry_ms) = pending.next_retry_ms else {
+                continue;
+            };
+            if now_ms < next_retry_ms {
+                continue;
+            }
+            let pending = self
+                .deliveries
+                .get_mut(&message_id)
+                .expect("delivery exists");
+            let retry = match &pending.message {
+                Frame::Message { retry, .. } => *retry,
+                _ => RetryPolicy::None,
+            };
+            let RetryPolicy::Exponential { max_attempts, .. } = retry else {
+                continue;
+            };
+            if pending.attempts >= max_attempts {
+                let sender = pending.sender;
+                self.deliveries.remove(&message_id);
+                events.push(DeliveryEvent::Result {
+                    sender,
+                    message_id,
+                    outcome: DeliveryOutcome::DeliveryFailed,
+                });
+                continue;
+            }
+            pending.attempts += 1;
+            pending.next_retry_ms = retry_next(retry, now_ms, pending.attempts);
+            events.push(DeliveryEvent::Deliver {
+                sender: pending.sender,
+                recipients: pending
+                    .recipients
+                    .difference(&pending.acknowledgements)
+                    .copied()
+                    .collect(),
+                message: pending.message.clone(),
+            });
+        }
+        events
+    }
+
+    /// Removes a peer and returns any reliability outcomes caused by that disconnect.
+    pub fn disconnect_with_events(&mut self, peer: PeerId) -> Result<Vec<DeliveryEvent>, Error> {
+        self.disconnect(peer)?;
+        let affected: Vec<_> = self
+            .deliveries
+            .iter()
+            .filter(|(_, pending)| pending.recipients.contains(&peer))
+            .map(|(message_id, pending)| (*message_id, pending.sender))
+            .collect();
+        let mut events = Vec::new();
+        for (message_id, sender) in affected {
+            self.deliveries.remove(&message_id);
+            events.push(DeliveryEvent::Result {
+                sender,
+                message_id,
+                outcome: DeliveryOutcome::RecipientDisconnected,
+            });
+        }
+        Ok(events)
+    }
+
+    fn complete_response(
+        &mut self,
+        sender: PeerId,
+        message: Frame,
+    ) -> Result<Vec<DeliveryEvent>, Error> {
+        let (correlation_id, status) = match &message {
+            Frame::Message {
+                correlation_id,
+                status,
+                ..
+            } => (*correlation_id, *status),
+            _ => return Err(Error::InvalidDelivery),
+        };
+        let pending = self
+            .deliveries
+            .get_mut(&correlation_id)
+            .ok_or(Error::UnknownDelivery(correlation_id))?;
+        let Frame::Message {
+            kind: MessageKind::Request,
+            request_policy,
+            ..
+        } = &pending.message
+        else {
+            return Err(Error::UnexpectedResponse(correlation_id));
+        };
+        if !pending.recipients.contains(&sender) || pending.responses.contains_key(&sender) {
+            return Err(Error::UnexpectedResponse(correlation_id));
+        }
+        let requester = pending.sender;
+        pending.responses.insert(sender, message.clone());
+        let completed = match request_policy {
+            RequestPolicy::Exact | RequestPolicy::First => true,
+            RequestPolicy::FirstSuccess => {
+                status == Status::Success || pending.responses.len() == pending.recipients.len()
+            }
+            RequestPolicy::All => pending.responses.len() == pending.recipients.len(),
+        };
+        let forward = match request_policy {
+            RequestPolicy::Exact | RequestPolicy::First | RequestPolicy::All => Some(message),
+            RequestPolicy::FirstSuccess if status == Status::Success => Some(message),
+            RequestPolicy::FirstSuccess if completed => pending.responses.values().next().cloned(),
+            RequestPolicy::FirstSuccess => None,
+        };
+        if completed {
+            self.deliveries.remove(&correlation_id);
+        }
+        Ok(forward
+            .into_iter()
+            .map(|message| DeliveryEvent::Deliver {
+                sender,
+                recipients: vec![requester],
+                message,
+            })
+            .collect())
+    }
+
     /// Returns discovery records that keep claimed and authenticated metadata separate.
     #[must_use]
     pub fn peers(&self) -> Vec<PeerInfo> {
@@ -426,6 +742,64 @@ fn filters_match(filters: &[HeaderFilter], headers: &Headers) -> bool {
     })
 }
 
+fn validate_message_headers(headers: &Headers) -> Result<(), Error> {
+    for name in headers.keys() {
+        if name.starts_with("broker.") || name.starts_with("peer.") || name.starts_with("auth.") {
+            return Err(Error::ReservedHeader(name.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn requirement_possible(requirement: AckRequirement, recipients: usize) -> bool {
+    match requirement {
+        AckRequirement::None => true,
+        AckRequirement::Any | AckRequirement::All => recipients != 0,
+        AckRequirement::Minimum(minimum) => recipients >= usize::from(minimum),
+    }
+}
+
+fn requirement_met(
+    requirement: AckRequirement,
+    acknowledgements: usize,
+    recipients: usize,
+) -> bool {
+    match requirement {
+        AckRequirement::None => true,
+        AckRequirement::Any => acknowledgements != 0,
+        AckRequirement::All => acknowledgements == recipients,
+        AckRequirement::Minimum(minimum) => acknowledgements >= usize::from(minimum),
+    }
+}
+
+fn acknowledgement_satisfies(required: AckPolicy, actual: AckPolicy) -> bool {
+    matches!(
+        (required, actual),
+        (
+            AckPolicy::Received,
+            AckPolicy::Received | AckPolicy::Processed
+        ) | (AckPolicy::Processed, AckPolicy::Processed)
+    )
+}
+
+fn retry_next(retry: RetryPolicy, now_ms: u64, attempts: u8) -> Option<u64> {
+    let RetryPolicy::Exponential {
+        initial_backoff_ms,
+        max_attempts,
+    } = retry
+    else {
+        return None;
+    };
+    if attempts >= max_attempts {
+        return Some(now_ms);
+    }
+    let shift = u32::from(attempts.saturating_sub(1)).min(16);
+    let delay = u64::from(initial_backoff_ms)
+        .saturating_mul(1_u64 << shift)
+        .min(60_000);
+    Some(now_ms.saturating_add(delay))
+}
+
 /// A broker operation error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -446,6 +820,18 @@ pub enum Error {
     ReservedHeader(String),
     /// No eligible recipient matched a unicast destination.
     NoRecipient,
+    /// A frame was not a client-originated message.
+    InvalidDelivery,
+    /// A logical message ID is already in flight.
+    DuplicateMessage(MessageId),
+    /// No reliability state exists for this logical message.
+    UnknownDelivery(MessageId),
+    /// A peer acknowledged a message it was not selected to receive.
+    UnexpectedAcknowledgement(MessageId),
+    /// A peer attempted an invalid response correlation.
+    UnexpectedResponse(MessageId),
+    /// A relative deadline overflowed the broker clock.
+    DeadlineOverflow,
 }
 
 impl fmt::Display for Error {
@@ -467,6 +853,22 @@ impl fmt::Display for Error {
                 )
             }
             Self::NoRecipient => formatter.write_str("no eligible recipient"),
+            Self::InvalidDelivery => formatter.write_str("invalid delivery frame"),
+            Self::DuplicateMessage(message_id) => {
+                write!(formatter, "message {message_id:?} is already in flight")
+            }
+            Self::UnknownDelivery(message_id) => {
+                write!(formatter, "unknown delivery {message_id:?}")
+            }
+            Self::UnexpectedAcknowledgement(message_id) => {
+                write!(formatter, "unexpected acknowledgement for {message_id:?}")
+            }
+            Self::UnexpectedResponse(message_id) => {
+                write!(formatter, "unexpected response for {message_id:?}")
+            }
+            Self::DeadlineOverflow => {
+                formatter.write_str("message deadline overflowed broker clock")
+            }
         }
     }
 }
@@ -765,6 +1167,177 @@ mod tests {
         );
         assert!(
             matches!(broker.drain_events().as_slice(), [LifecycleEvent::PeerConnected { peer: id }] if *id == peer)
+        );
+    }
+
+    fn reliable_message(
+        kind: MessageKind,
+        destination: Destination,
+        message_id: u8,
+        ack_policy: AckPolicy,
+        retry: RetryPolicy,
+    ) -> Frame {
+        Frame::Message {
+            kind,
+            ack_policy,
+            ack_requirement: if ack_policy == AckPolicy::None {
+                AckRequirement::None
+            } else if ack_policy == AckPolicy::Accepted {
+                AckRequirement::None
+            } else {
+                AckRequirement::All
+            },
+            request_policy: RequestPolicy::Exact,
+            deadline_ms: 100,
+            retry,
+            destination,
+            message_id: MessageId::new([message_id; 16]),
+            correlation_id: MessageId::absent(),
+            status: Status::Success,
+            headers: Headers::new(),
+            payload: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn retries_keep_the_logical_message_id_and_are_bounded() {
+        let mut broker = Broker::new(AllowAll);
+        let sender = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let recipient = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let message = reliable_message(
+            MessageKind::Signal,
+            Destination::Peer(recipient),
+            7,
+            AckPolicy::Processed,
+            RetryPolicy::Exponential {
+                initial_backoff_ms: 10,
+                max_attempts: 2,
+            },
+        );
+        let message_id = match &message {
+            Frame::Message { message_id, .. } => *message_id,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            broker.begin_delivery(sender, message, 0).unwrap().as_slice(),
+            [DeliveryEvent::Deliver { message, .. }]
+                if matches!(message, Frame::Message { message_id: id, .. } if *id == message_id)
+        ));
+        assert!(matches!(
+            broker.tick(10).as_slice(),
+            [DeliveryEvent::Deliver { message, .. }]
+                if matches!(message, Frame::Message { message_id: id, .. } if *id == message_id)
+        ));
+        assert_eq!(
+            broker.tick(30),
+            vec![DeliveryEvent::Result {
+                sender,
+                message_id,
+                outcome: DeliveryOutcome::DeliveryFailed,
+            }]
+        );
+    }
+
+    #[test]
+    fn timeout_and_duplicate_ids_are_deterministic() {
+        let mut broker = Broker::new(AllowAll);
+        let sender = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let recipient = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let message = reliable_message(
+            MessageKind::Request,
+            Destination::Peer(recipient),
+            8,
+            AckPolicy::None,
+            RetryPolicy::None,
+        );
+        let message_id = match &message {
+            Frame::Message { message_id, .. } => *message_id,
+            _ => unreachable!(),
+        };
+        broker.begin_delivery(sender, message.clone(), 10).unwrap();
+        assert_eq!(
+            broker.begin_delivery(sender, message, 10),
+            Err(Error::DuplicateMessage(message_id))
+        );
+        assert_eq!(
+            broker.tick(110),
+            vec![DeliveryEvent::Result {
+                sender,
+                message_id,
+                outcome: DeliveryOutcome::Timeout,
+            }]
+        );
+    }
+
+    #[test]
+    fn acknowledgements_obey_cardinality_and_recipient_loss_is_explicit() {
+        let mut broker = Broker::new(AllowAll);
+        let sender = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let first = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let second = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let message = Frame::Message {
+            kind: MessageKind::Signal,
+            ack_policy: AckPolicy::Processed,
+            ack_requirement: AckRequirement::Minimum(2),
+            request_policy: RequestPolicy::Exact,
+            deadline_ms: 100,
+            retry: RetryPolicy::None,
+            destination: Destination::Broadcast,
+            message_id: MessageId::new([9; 16]),
+            correlation_id: MessageId::absent(),
+            status: Status::Success,
+            headers: Headers::new(),
+            payload: Vec::new(),
+        };
+        let message_id = MessageId::new([9; 16]);
+        broker.begin_delivery(sender, message, 0).unwrap();
+        assert!(
+            broker
+                .acknowledge(first, message_id, AckPolicy::Processed)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            broker
+                .acknowledge(second, message_id, AckPolicy::Processed)
+                .unwrap(),
+            vec![DeliveryEvent::Result {
+                sender,
+                message_id,
+                outcome: DeliveryOutcome::Processed,
+            }]
+        );
+
+        let message = reliable_message(
+            MessageKind::Request,
+            Destination::Peer(first),
+            10,
+            AckPolicy::None,
+            RetryPolicy::None,
+        );
+        let message_id = MessageId::new([10; 16]);
+        broker.begin_delivery(sender, message, 0).unwrap();
+        assert_eq!(
+            broker.disconnect_with_events(first).unwrap(),
+            vec![DeliveryEvent::Result {
+                sender,
+                message_id,
+                outcome: DeliveryOutcome::RecipientDisconnected,
+            }]
         );
     }
 }
