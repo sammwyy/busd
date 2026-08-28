@@ -16,6 +16,7 @@ const MSG_NOSIGNAL: i32 = 0x4000;
 const MSG_TRUNC: i32 = 0x20;
 const SOL_SOCKET: i32 = 1;
 const SO_PEERCRED: i32 = 17;
+const SHUT_RDWR: i32 = 2;
 const SUN_PATH_CAPACITY: usize = 108;
 
 #[repr(C)]
@@ -46,6 +47,7 @@ unsafe extern "C" {
         option_value: *mut c_void,
         option_length: *mut u32,
     ) -> i32;
+    fn shutdown(socket: i32, how: i32) -> i32;
 }
 
 #[cfg(test)]
@@ -182,6 +184,14 @@ impl Connection {
             uid: credentials.uid,
             gid: credentials.gid,
         })
+    }
+
+    /// Shuts down both directions of the connected socket.
+    pub fn disconnect(self) -> io::Result<()> {
+        if unsafe { shutdown(self.fd.as_raw_fd(), SHUT_RDWR) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 }
 
