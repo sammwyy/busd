@@ -9,6 +9,8 @@ matches your goal:
   compatibility policy.
 - [Foundation guide](development/foundation.md) — supported environments, crate
   ownership, development checks, and documentation rules.
+- [Operations guide](operations.md) — policy configuration, safe defaults, and
+  production troubleshooting.
 - [Project roadmap](../ROADMAP.md) — implementation phases and release milestones.
 
 The specification describes intended BUS/1 behavior. The README and foundation

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use bus_policy::{Action, Credentials, Policy};
+use bus_policy::{Action, Credentials, Policy, Request as PolicyRequest};
 use bus_protocol::{
     AckPolicy, AckRequirement, Capabilities, Channel, ClientId, ClientSelection, DeliveryOutcome,
     Destination, Frame, HeaderFilter, HeaderValue, Headers, MessageId, MessageKind, Namespace,
@@ -139,7 +139,7 @@ impl<P: Policy> Broker<P> {
         hello: ClientHello,
     ) -> Result<ConnectedPeer, Error> {
         validate_claimed_headers(&hello.headers)?;
-        self.authorize(credentials, Action::Connect)?;
+        self.authorize_hello(&credentials, &hello, Action::Connect)?;
         let id = PeerId::new(self.next_peer);
         self.next_peer = self
             .next_peer
@@ -196,8 +196,7 @@ impl<P: Policy> Broker<P> {
 
     /// Exclusively claims a namespace for a connected peer.
     pub fn claim(&mut self, peer: PeerId, namespace: Namespace) -> Result<(), Error> {
-        let credentials = self.credentials(peer)?;
-        self.authorize(credentials, Action::ClaimNamespace(namespace.clone()))?;
+        self.authorize(peer, Action::ClaimNamespace(namespace.clone()))?;
         if let Some(owner) = self.namespaces.get(&namespace) {
             return Err(Error::NamespaceAlreadyOwned {
                 namespace,
@@ -225,8 +224,7 @@ impl<P: Policy> Broker<P> {
         channel: Channel,
         filters: Vec<HeaderFilter>,
     ) -> Result<(), Error> {
-        let credentials = self.credentials(peer)?;
-        self.authorize(credentials, Action::Subscribe(channel.clone()))?;
+        self.authorize(peer, Action::Subscribe(channel.clone()))?;
         self.subscriptions
             .entry(channel)
             .or_default()
@@ -273,11 +271,11 @@ impl<P: Policy> Broker<P> {
         destination: &Destination,
         headers: &Headers,
     ) -> Result<Vec<PeerId>, Error> {
-        let credentials = self.credentials(sender)?;
+        self.credentials(sender)?;
         let recipients = match destination {
             Destination::Broker => return Err(Error::NoRecipient),
             Destination::Peer(peer) => {
-                self.authorize(credentials, Action::SendPeer(*peer))?;
+                self.authorize(sender, Action::SendPeer(*peer))?;
                 self.peers
                     .contains_key(peer)
                     .then_some(*peer)
@@ -285,11 +283,11 @@ impl<P: Policy> Broker<P> {
                     .collect()
             }
             Destination::Namespace(namespace) => {
-                self.authorize(credentials, Action::SendNamespace(namespace.clone()))?;
+                self.authorize(sender, Action::SendNamespace(namespace.clone()))?;
                 self.namespace_owner(namespace).into_iter().collect()
             }
             Destination::Channel(channel) => {
-                self.authorize(credentials, Action::Publish(channel.clone()))?;
+                self.authorize(sender, Action::Publish(channel.clone()))?;
                 self.subscriptions
                     .get(channel)
                     .map_or_else(Vec::new, |subscribers| {
@@ -305,7 +303,7 @@ impl<P: Policy> Broker<P> {
                 client_id,
                 selection,
             } => {
-                self.authorize(credentials, Action::SendClient(client_id.clone()))?;
+                self.authorize(sender, Action::SendClient(client_id.clone()))?;
                 let mut matching: Vec<_> = self
                     .peers
                     .values()
@@ -319,7 +317,7 @@ impl<P: Policy> Broker<P> {
                 matching
             }
             Destination::Broadcast => {
-                self.authorize(credentials, Action::Broadcast)?;
+                self.authorize(sender, Action::Broadcast)?;
                 self.peers
                     .keys()
                     .copied()
@@ -438,7 +436,7 @@ impl<P: Policy> Broker<P> {
         message_id: MessageId,
         policy: AckPolicy,
     ) -> Result<Vec<DeliveryEvent>, Error> {
-        self.credentials(peer)?;
+        self.authorize(peer, Action::Acknowledge)?;
         let pending = self
             .deliveries
             .get_mut(&message_id)
@@ -665,12 +663,36 @@ impl<P: Policy> Broker<P> {
     fn credentials(&self, peer: PeerId) -> Result<Credentials, Error> {
         self.peers
             .get(&peer)
-            .map(|peer| peer.credentials)
+            .map(|peer| peer.credentials.clone())
             .ok_or(Error::UnknownPeer(peer))
     }
 
-    fn authorize(&self, credentials: Credentials, action: Action) -> Result<(), Error> {
-        if self.policy.permits(credentials, &action) {
+    fn authorize(&self, peer: PeerId, action: Action) -> Result<(), Error> {
+        let peer = self.peers.get(&peer).ok_or(Error::UnknownPeer(peer))?;
+        if self.policy.permits(&PolicyRequest {
+            credentials: &peer.credentials,
+            client_id: peer.hello.client_id.as_ref(),
+            claimed_headers: &peer.hello.headers,
+            action: &action,
+        }) {
+            Ok(())
+        } else {
+            Err(Error::Denied(action))
+        }
+    }
+
+    fn authorize_hello(
+        &self,
+        credentials: &Credentials,
+        hello: &ClientHello,
+        action: Action,
+    ) -> Result<(), Error> {
+        if self.policy.permits(&PolicyRequest {
+            credentials,
+            client_id: hello.client_id.as_ref(),
+            claimed_headers: &hello.headers,
+            action: &action,
+        }) {
             Ok(())
         } else {
             Err(Error::Denied(action))
@@ -699,7 +721,7 @@ impl From<&Peer> for PeerInfo {
             id: peer.id,
             client_id: peer.hello.client_id.clone(),
             claimed_headers: peer.hello.headers.clone(),
-            credentials: peer.credentials,
+            credentials: peer.credentials.clone(),
             capabilities: peer.capabilities.clone(),
         }
     }
@@ -908,6 +930,7 @@ mod tests {
             pid: 1,
             uid: 1000,
             gid: 1000,
+            ..Credentials::default()
         }
     }
 
@@ -982,8 +1005,8 @@ mod tests {
         struct RootOnly;
 
         impl Policy for RootOnly {
-            fn permits(&self, credentials: Credentials, _: &Action) -> bool {
-                credentials.uid == 0
+            fn permits(&self, request: &PolicyRequest<'_>) -> bool {
+                request.credentials.uid == 0
             }
         }
 
@@ -1120,8 +1143,8 @@ mod tests {
 
         struct NoBroadcast;
         impl Policy for NoBroadcast {
-            fn permits(&self, _: Credentials, action: &Action) -> bool {
-                !matches!(action, Action::Broadcast)
+            fn permits(&self, request: &PolicyRequest<'_>) -> bool {
+                !matches!(request.action, Action::Broadcast)
             }
         }
         let mut restricted = Broker::new(NoBroadcast);

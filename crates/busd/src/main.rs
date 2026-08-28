@@ -128,6 +128,7 @@ fn serve_peer(
             pid: credentials.pid,
             uid: credentials.uid,
             gid: credentials.gid,
+            ..Credentials::default()
         },
         hello,
     ) {
