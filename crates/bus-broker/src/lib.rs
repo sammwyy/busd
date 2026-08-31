@@ -53,6 +53,7 @@ pub struct Broker<P> {
     next_peer: u64,
     peers: BTreeMap<PeerId, Peer>,
     namespaces: BTreeMap<Namespace, PeerId>,
+    dbus_names: BTreeMap<String, PeerId>,
     subscriptions: BTreeMap<Channel, BTreeMap<PeerId, Vec<HeaderFilter>>>,
     deliveries: BTreeMap<MessageId, PendingDelivery>,
     events: Vec<LifecycleEvent>,
@@ -227,6 +228,7 @@ impl<P: Policy> Broker<P> {
             next_peer: 1,
             peers: BTreeMap::new(),
             namespaces: BTreeMap::new(),
+            dbus_names: BTreeMap::new(),
             subscriptions: BTreeMap::new(),
             deliveries: BTreeMap::new(),
             events: Vec::new(),
@@ -246,6 +248,7 @@ impl<P: Policy> Broker<P> {
             next_peer: 1,
             peers: BTreeMap::new(),
             namespaces: BTreeMap::new(),
+            dbus_names: BTreeMap::new(),
             subscriptions: BTreeMap::new(),
             deliveries: BTreeMap::new(),
             events: Vec::new(),
@@ -312,6 +315,7 @@ impl<P: Policy> Broker<P> {
             .map(|(namespace, _)| namespace.clone())
             .collect();
         self.namespaces.retain(|_, owner| *owner != peer);
+        self.dbus_names.retain(|_, owner| *owner != peer);
         for namespace in released {
             self.events.push(LifecycleEvent::NamespaceOwnerChanged {
                 namespace,
@@ -419,6 +423,29 @@ impl<P: Policy> Broker<P> {
     #[must_use]
     pub fn namespace_owner(&self, namespace: &Namespace) -> Option<PeerId> {
         self.namespaces.get(namespace).copied()
+    }
+
+    /// Registers a D-Bus well-known name for a connected peer.
+    ///
+    /// D-Bus registration is an optional compatibility operation. It does not
+    /// create a BUS namespace or imply any semantic method translation.
+    pub fn register_dbus_name(&mut self, peer: PeerId, name: String) -> Result<(), Error> {
+        validate_dbus_name(&name).map_err(|_| Error::InvalidDbusName(name.clone()))?;
+        self.authorize(peer, Action::RegisterDbusName(name.clone()))?;
+        if let Some(owner) = self.dbus_names.get(&name) {
+            return Err(Error::DbusNameAlreadyOwned {
+                name,
+                owner: *owner,
+            });
+        }
+        self.dbus_names.insert(name, peer);
+        Ok(())
+    }
+
+    /// Returns the peer currently registered for a D-Bus name, if any.
+    #[must_use]
+    pub fn dbus_name_owner(&self, name: &str) -> Option<PeerId> {
+        self.dbus_names.get(name).copied()
     }
 
     /// Returns the currently subscribed peers for a channel.
@@ -1214,6 +1241,15 @@ pub enum Error {
         /// Its current owner.
         owner: PeerId,
     },
+    /// A D-Bus name already has a connected owner.
+    DbusNameAlreadyOwned {
+        /// The requested D-Bus name.
+        name: String,
+        /// Its current owner.
+        owner: PeerId,
+    },
+    /// A D-Bus name does not follow the well-known-name grammar.
+    InvalidDbusName(String),
     /// The active policy rejected an action.
     Denied(Action),
     /// No further peer identifiers can be assigned.
@@ -1250,6 +1286,10 @@ impl fmt::Display for Error {
                     "namespace {namespace} is already owned by {owner}"
                 )
             }
+            Self::DbusNameAlreadyOwned { name, owner } => {
+                write!(formatter, "D-Bus name {name} is already owned by {owner}")
+            }
+            Self::InvalidDbusName(name) => write!(formatter, "invalid D-Bus name {name}"),
             Self::Denied(_) => formatter.write_str("operation denied by policy"),
             Self::PeerIdExhausted => formatter.write_str("peer identifier space exhausted"),
             Self::ReservedHeader(header) => {
@@ -1287,6 +1327,24 @@ fn validate_claimed_headers(headers: &Headers) -> Result<(), Error> {
     for name in headers.keys() {
         if name.starts_with("auth.") || name.starts_with("broker.") || name.starts_with("peer.") {
             return Err(Error::ReservedHeader(name.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_dbus_name(name: &str) -> Result<(), ()> {
+    if name.is_empty() || name.len() > 255 {
+        return Err(());
+    }
+    for component in name.split('.') {
+        let mut bytes = component.bytes();
+        let Some(first) = bytes.next() else {
+            return Err(());
+        };
+        if !(first.is_ascii_alphabetic() || first == b'_')
+            || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(());
         }
     }
     Ok(())
@@ -1372,6 +1430,53 @@ mod tests {
             },
         );
         assert!(matches!(error, Err(Error::ReservedHeader(header)) if header == "peer.uid"));
+    }
+
+    #[test]
+    fn dbus_names_are_exclusive_and_released() {
+        let mut broker = Broker::new(AllowAll);
+        let first = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        let second = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+
+        broker
+            .register_dbus_name(first, "com.example.Service".into())
+            .unwrap();
+        assert_eq!(broker.dbus_name_owner("com.example.Service"), Some(first));
+        assert!(matches!(
+            broker.register_dbus_name(second, "com.example.Service".into()),
+            Err(Error::DbusNameAlreadyOwned { .. })
+        ));
+        assert!(matches!(
+            broker.register_dbus_name(second, "-invalid.Name".into()),
+            Err(Error::InvalidDbusName(_))
+        ));
+
+        broker.disconnect(first).unwrap();
+        assert_eq!(broker.dbus_name_owner("com.example.Service"), None);
+    }
+
+    #[test]
+    fn dbus_name_registration_is_policy_gated() {
+        struct NoDbus;
+
+        impl Policy for NoDbus {
+            fn permits(&self, request: &PolicyRequest<'_>) -> bool {
+                !matches!(request.action, Action::RegisterDbusName(_))
+            }
+        }
+
+        let mut broker = Broker::new(NoDbus);
+        let peer = broker
+            .connect(credentials(), ClientHello::default())
+            .unwrap();
+        assert!(matches!(
+            broker.register_dbus_name(peer, "com.example.Service".into()),
+            Err(Error::Denied(Action::RegisterDbusName(name))) if name == "com.example.Service"
+        ));
     }
 
     #[test]

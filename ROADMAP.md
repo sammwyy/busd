@@ -183,13 +183,13 @@ layers. Checkboxes record repository status, not an estimated schedule.
 
 **Milestone:** M5 — Optional extensions.
 
-- [ ] Define extension registration and capability negotiation rules before adding new frame behavior.
-- [ ] Implement `bus-transport-dbus` behind the existing `dbus` feature flag.
-- [ ] Choose and document supported D-Bus modes: direct transport, BUS personality,
+- [x] Define extension registration and capability negotiation rules before adding new frame behavior.
+- [x] Implement `bus-transport-dbus` behind the existing `dbus` feature flag.
+- [x] Choose and document supported D-Bus modes: direct transport, BUS personality,
   and/or export registration.
-- [ ] Keep semantic API adapters separate from transport translation.
-- [ ] Add D-Bus name-registration policy controls and compatibility integration tests.
-- [ ] Evaluate durable queues, service activation, remote gateways, federation, and
+- [x] Keep semantic API adapters separate from transport translation.
+- [x] Add D-Bus name-registration policy controls and compatibility integration tests.
+- [x] Evaluate durable queues, service activation, remote gateways, federation, and
   shared providers only as separately negotiated future capabilities.
 
 **Exit criteria**

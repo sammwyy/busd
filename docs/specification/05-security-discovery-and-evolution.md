@@ -167,6 +167,26 @@ large-payload-memfd
 
 Clients must not assume optional capabilities exist.
 
+## Extension registration rules
+
+An extension is identified by one capability name and one independent semantic
+version. Capability names are canonical, case-sensitive ASCII names with
+components separated by `.`; each component starts with an ASCII letter or
+underscore and continues with ASCII letters, digits, or underscores. Names are
+limited to 255 bytes and are compared bytewise.
+
+The broker advertises the extension versions it implements. A client offers
+the versions it understands in `HELLO`; the `WELCOME` capability set contains
+only the exact names selected by intersection. An absent selected capability
+means that the extension is unavailable for that session. Extensions must not
+change the meaning of BUS/1-preview frames unless their capability was
+selected, and an extension must reject unsupported versions explicitly.
+
+Registration of an extension-owned identity is a separate authorized broker
+operation. Registration is exclusive, is released when its peer disconnects,
+and never creates a BUS namespace implicitly. Transport translation and API
+semantics remain separate adapter responsibilities.
+
 ---
 
 # 43. Protocol versioning
@@ -275,6 +295,5 @@ busd
 and no D-Bus implementation at all.
 
 ---
-
 
 

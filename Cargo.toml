@@ -5,6 +5,7 @@ members = [
     "crates/bus-policy",
     "crates/bus-broker",
     "crates/bus-transport-unix",
+    "crates/bus-transport-dbus",
     "crates/busd",
 ]
 default-members = ["crates/busd"]

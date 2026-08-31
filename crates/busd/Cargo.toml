@@ -14,7 +14,7 @@ categories.workspace = true
 [features]
 default = ["unix"]
 unix = ["dep:bus-transport-unix"]
-dbus = []
+dbus = ["dep:bus-transport-dbus"]
 monitoring = []
 
 [dependencies]
@@ -23,6 +23,7 @@ bus-client = { path = "../bus-client" }
 bus-policy = { path = "../bus-policy" }
 bus-protocol = { path = "../bus-protocol" }
 bus-transport-unix = { path = "../bus-transport-unix", optional = true }
+bus-transport-dbus = { path = "../bus-transport-dbus", optional = true }
 
 [dev-dependencies]
 bus-client = { path = "../bus-client" }

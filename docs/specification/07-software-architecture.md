@@ -89,9 +89,15 @@ peer credentials
 
 # 60. `bus-transport-dbus`
 
-Optional D-Bus transport implementation.
+Optional D-Bus transport implementation, provided by `bus-transport-dbus` and
+enabled by the `busd/dbus` feature.
 
 Allows BUS-aware software to operate directly on a D-Bus system without `busd`.
+
+The transport exposes validated D-Bus names, standard session/system-bus
+connections, and well-known-name registration. It does not decide how a
+D-Bus method maps to a BUS namespace or message; that semantic adapter remains
+an application or compatibility-service concern.
 
 This crate does not need to be linked into minimal builds.
 
@@ -166,6 +172,5 @@ busd = unix + dbus
 ```
 
 ---
-
 
 
