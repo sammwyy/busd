@@ -12,8 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-bus-protocol = { path = "../bus-protocol", version = "0.1.0" }
-bus-transport-unix = { path = "../bus-transport-unix", version = "0.1.0" }
+busd-protocol = { package = "busd-protocol", path = "../bus-protocol", version = "0.1.0" }
+busd-transport-unix = { package = "busd-transport-unix", path = "../bus-transport-unix", version = "0.1.0" }
 
 [lints]
 workspace = true

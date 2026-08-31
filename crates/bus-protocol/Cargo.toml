@@ -1,5 +1,5 @@
 [package]
-name = "bus-protocol"
+name = "busd-protocol"
 description = "Protocol model for BUS/1."
 version.workspace = true
 edition.workspace = true

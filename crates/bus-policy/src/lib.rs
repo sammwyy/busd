@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use bus_protocol::{Channel, ClientId, Headers, Namespace, PeerId};
+use busd_protocol::{Channel, ClientId, Headers, Namespace, PeerId};
 
 /// Broker-verified operating-system identity.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -365,7 +365,7 @@ fn rule_matches(rule: &Rule, request: &Request<'_>) -> bool {
         && rule.cgroup.as_ref().is_none_or(|value| credentials.cgroup.as_ref() == Some(value))
         && rule.client_id.as_ref().is_none_or(|value| request.client_id.is_some_and(|client_id| client_id.as_str() == value))
         && rule.target.as_ref().is_none_or(|selector| target_matches(selector, request.action.target().as_deref()))
-        && rule.headers.iter().all(|(name, value)| matches!(request.claimed_headers.get(name), Some(bus_protocol::HeaderValue::Text(actual)) if actual == value))
+        && rule.headers.iter().all(|(name, value)| matches!(request.claimed_headers.get(name), Some(busd_protocol::HeaderValue::Text(actual)) if actual == value))
 }
 
 fn target_matches(selector: &str, target: Option<&str>) -> bool {
@@ -407,7 +407,7 @@ fn unquote(value: &str, line: usize) -> Result<String, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bus_protocol::HeaderValue;
+    use busd_protocol::HeaderValue;
 
     fn request<'a>(
         credentials: &'a Credentials,

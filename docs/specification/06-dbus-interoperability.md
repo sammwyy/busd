@@ -2,7 +2,7 @@
 
 [← Specification index](../SPECS.md)
 
-The implementation currently provides the optional `bus-transport-dbus` crate
+The implementation currently provides the optional `busd-transport-dbus` crate
 for direct D-Bus connections and well-known-name registration. The daemon's
 native BUS listener remains independent of it; enabling the `busd/dbus` feature
 adds the crate without making D-Bus a requirement for native clients.
@@ -83,7 +83,7 @@ Here `busd` itself exposes the D-Bus system-bus transport.
 The supported compatibility modes are therefore explicit:
 
 * BUS-only is the default and has no D-Bus dependency.
-* Direct D-Bus uses `bus-transport-dbus` to connect to an existing session or
+* Direct D-Bus uses `busd-transport-dbus` to connect to an existing session or
   system bus.
 * BUS with D-Bus personality is an optional future daemon frontend; it must be
   negotiated and configured separately from the native listener.
@@ -265,4 +265,3 @@ semantics before implementation. A peer must never infer support for one of
 these features from D-Bus availability or from a registered name.
 
 ---
-

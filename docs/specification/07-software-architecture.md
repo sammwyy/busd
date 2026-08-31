@@ -10,18 +10,18 @@ Possible structure:
 
 ```text
 bus/
-├── bus-protocol
-├── bus-client
-├── bus-transport-unix
-├── bus-transport-dbus
-├── bus-broker
-├── bus-policy
+├── busd-protocol
+├── busd-client
+├── busd-transport-unix
+├── busd-transport-dbus
+├── busd-broker
+├── busd-policy
 └── busd
 ```
 
 ---
 
-# 57. `bus-protocol`
+# 57. `busd-protocol`
 
 Contains only protocol-level structures.
 
@@ -50,7 +50,7 @@ No D-Bus.
 
 ---
 
-# 58. `bus-client`
+# 58. `busd-client`
 
 High-level API used by applications.
 
@@ -71,7 +71,7 @@ bus.publish(
 
 ---
 
-# 59. `bus-transport-unix`
+# 59. `busd-transport-unix`
 
 Native BUS/1 transport implementation.
 
@@ -87,9 +87,9 @@ peer credentials
 
 ---
 
-# 60. `bus-transport-dbus`
+# 60. `busd-transport-dbus`
 
-Optional D-Bus transport implementation, provided by `bus-transport-dbus` and
+Optional D-Bus transport implementation, provided by `busd-transport-dbus` and
 enabled by the `busd/dbus` feature.
 
 Allows BUS-aware software to operate directly on a D-Bus system without `busd`.
@@ -103,7 +103,7 @@ This crate does not need to be linked into minimal builds.
 
 ---
 
-# 61. `bus-broker`
+# 61. `busd-broker`
 
 Contains generic broker state:
 
@@ -123,7 +123,7 @@ It should ideally be mostly independent of the concrete socket listener.
 
 ---
 
-# 62. `bus-policy`
+# 62. `busd-policy`
 
 Contains security policy parsing and authorization.
 
@@ -172,5 +172,4 @@ busd = unix + dbus
 ```
 
 ---
-
 

@@ -1,5 +1,5 @@
 [package]
-name = "bus-transport-dbus"
+name = "busd-transport-dbus"
 description = "Optional D-Bus transport primitives for BUS/1 compatibility."
 version.workspace = true
 edition.workspace = true

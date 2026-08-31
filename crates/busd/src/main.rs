@@ -8,12 +8,12 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use bus_broker::{Broker, ClientHello, DeliveryEvent, Error as BrokerError, Limits};
-use bus_policy::{AllowAll, ConfigPolicy, Credentials, Policy, SafeDefaults};
-use bus_protocol::{CodecError, Frame, FrameLimits, HeaderValue, ProtocolErrorCode};
+use busd_broker::{Broker, ClientHello, DeliveryEvent, Error as BrokerError, Limits};
+use busd_policy::{AllowAll, ConfigPolicy, Credentials, Policy, SafeDefaults};
+use busd_protocol::{CodecError, Frame, FrameLimits, HeaderValue, ProtocolErrorCode};
 
 #[cfg(feature = "unix")]
-use bus_transport_unix::{Connection, Listener};
+use busd_transport_unix::{Connection, Listener};
 
 const DEFAULT_SOCKET: &str = "/run/busd/busd.sock";
 
@@ -42,7 +42,7 @@ enum DaemonPolicy {
 }
 
 impl Policy for DaemonPolicy {
-    fn permits(&self, request: &bus_policy::Request<'_>) -> bool {
+    fn permits(&self, request: &busd_policy::Request<'_>) -> bool {
         match self {
             Self::SafeDefaults(policy) => policy.permits(request),
             Self::File(policy) => policy.permits(request),
@@ -229,7 +229,7 @@ fn run_health(socket: PathBuf) -> io::Result<()> {
 fn serve_peer<P: Policy>(
     peer: Connection,
     broker: Arc<Mutex<Broker<P>>>,
-    sessions: Arc<Mutex<BTreeMap<bus_protocol::PeerId, Connection>>>,
+    sessions: Arc<Mutex<BTreeMap<busd_protocol::PeerId, Connection>>>,
     limits: FrameLimits,
 ) -> io::Result<()> {
     let credentials = credentials_from_peer(peer.peer_credentials()?);
@@ -304,9 +304,9 @@ fn serve_peer<P: Policy>(
 #[cfg(feature = "unix")]
 fn dispatch_session<P: Policy>(
     peer: &Connection,
-    peer_id: bus_protocol::PeerId,
+    peer_id: busd_protocol::PeerId,
     broker: &Arc<Mutex<Broker<P>>>,
-    sessions: &Arc<Mutex<BTreeMap<bus_protocol::PeerId, Connection>>>,
+    sessions: &Arc<Mutex<BTreeMap<busd_protocol::PeerId, Connection>>>,
     limits: FrameLimits,
 ) -> io::Result<()> {
     loop {
@@ -327,7 +327,7 @@ fn dispatch_session<P: Policy>(
                     peer,
                     peer_id,
                     result,
-                    bus_protocol::ControlOperation::Claim,
+                    busd_protocol::ControlOperation::Claim,
                     limits,
                 )?;
                 continue;
@@ -348,7 +348,7 @@ fn dispatch_session<P: Policy>(
                     peer,
                     peer_id,
                     result,
-                    bus_protocol::ControlOperation::Subscribe,
+                    busd_protocol::ControlOperation::Subscribe,
                     limits,
                 )?;
                 continue;
@@ -362,7 +362,7 @@ fn dispatch_session<P: Policy>(
                     peer,
                     peer_id,
                     result,
-                    bus_protocol::ControlOperation::Unsubscribe,
+                    busd_protocol::ControlOperation::Unsubscribe,
                     limits,
                 )?;
                 continue;
@@ -450,7 +450,7 @@ fn dispatch_session<P: Policy>(
 
 #[cfg(feature = "unix")]
 fn dispatch_delivery_events(
-    sessions: &Arc<Mutex<BTreeMap<bus_protocol::PeerId, Connection>>>,
+    sessions: &Arc<Mutex<BTreeMap<busd_protocol::PeerId, Connection>>>,
     events: Vec<DeliveryEvent>,
     limits: FrameLimits,
 ) -> io::Result<()> {
@@ -511,7 +511,7 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(feature = "unix")]
-fn credentials_from_peer(peer: bus_transport_unix::PeerCredentials) -> Credentials {
+fn credentials_from_peer(peer: busd_transport_unix::PeerCredentials) -> Credentials {
     let root = PathBuf::from("/proc").join(peer.pid.to_string());
     let executable = std::fs::read_link(root.join("exe"))
         .ok()
@@ -543,9 +543,9 @@ fn credentials_from_peer(peer: bus_transport_unix::PeerCredentials) -> Credentia
 #[cfg(feature = "unix")]
 fn send_control_result(
     peer: &Connection,
-    peer_id: bus_protocol::PeerId,
-    result: Result<(), bus_broker::Error>,
-    operation: bus_protocol::ControlOperation,
+    peer_id: busd_protocol::PeerId,
+    result: Result<(), busd_broker::Error>,
+    operation: busd_protocol::ControlOperation,
     limits: FrameLimits,
 ) -> io::Result<()> {
     let frame = match result {
@@ -579,7 +579,7 @@ fn log_connection_error(credentials: &Credentials, error: &BrokerError) {
 }
 
 #[cfg(feature = "unix")]
-fn log_operation_error(peer: bus_protocol::PeerId, error: &BrokerError) {
+fn log_operation_error(peer: busd_protocol::PeerId, error: &BrokerError) {
     match error {
         BrokerError::Denied(action) => eprintln!(
             "busd event=policy_denied peer={} action={}",
@@ -635,7 +635,7 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> io::Error {
 mod tests {
     use super::*;
     #[cfg(feature = "unix")]
-    use bus_protocol::{Capabilities, Channel, Namespace};
+    use busd_protocol::{Capabilities, Channel, Namespace};
     #[cfg(feature = "unix")]
     use std::process;
     #[cfg(feature = "unix")]

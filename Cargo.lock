@@ -171,54 +171,54 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
-name = "bus-broker"
+name = "busd-broker"
 version = "0.1.0"
 dependencies = [
- "bus-policy",
- "bus-protocol",
+ "busd-policy",
+ "busd-protocol",
 ]
 
 [[package]]
-name = "bus-policy"
+name = "busd-client"
 version = "0.1.0"
 dependencies = [
- "bus-protocol",
+ "busd-protocol",
+ "busd-transport-unix",
 ]
 
 [[package]]
-name = "bus-protocol"
+name = "busd-policy"
+version = "0.1.0"
+dependencies = [
+ "busd-protocol",
+]
+
+[[package]]
+name = "busd-protocol"
 version = "0.1.0"
 
 [[package]]
-name = "bus-transport-dbus"
+name = "busd-server"
+version = "0.1.0"
+dependencies = [
+ "busd-broker",
+ "busd-client",
+ "busd-policy",
+ "busd-protocol",
+ "busd-transport-dbus",
+ "busd-transport-unix",
+]
+
+[[package]]
+name = "busd-transport-dbus"
 version = "0.1.0"
 dependencies = [
  "zbus",
 ]
 
 [[package]]
-name = "bus-transport-unix"
+name = "busd-transport-unix"
 version = "0.1.0"
-
-[[package]]
-name = "busd-client"
-version = "0.1.0"
-dependencies = [
- "bus-protocol",
- "bus-transport-unix",
-]
-
-[[package]]
-name = "busd-server"
-version = "0.1.0"
-dependencies = [
- "bus-broker",
- "bus-policy",
- "bus-protocol",
- "bus-transport-dbus",
- "bus-transport-unix",
- "busd-client",
-]
 
 [[package]]
 name = "cfg-if"

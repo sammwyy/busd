@@ -10,8 +10,8 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub use bus_protocol::*;
-use bus_transport_unix::Connection;
+pub use busd_protocol::*;
+use busd_transport_unix::Connection;
 
 /// Capability name for native `SCM_RIGHTS` support.
 pub const CAPABILITY_FD_PASSING: &str = "fd-passing";
@@ -564,7 +564,7 @@ impl From<CodecError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bus_transport_unix::Listener;
+    use busd_transport_unix::Listener;
     use std::process;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};

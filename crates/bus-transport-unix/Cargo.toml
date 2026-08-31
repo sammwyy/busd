@@ -1,5 +1,5 @@
 [package]
-name = "bus-transport-unix"
+name = "busd-transport-unix"
 description = "Linux AF_UNIX SOCK_SEQPACKET transport primitives for BUS/1."
 version.workspace = true
 edition.workspace = true

@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-use bus_policy::{Action, Credentials, Policy, Request as PolicyRequest};
-use bus_protocol::{
+use busd_policy::{Action, Credentials, Policy, Request as PolicyRequest};
+use busd_protocol::{
     AckPolicy, AckRequirement, Capabilities, Channel, ClientId, ClientSelection, DeliveryOutcome,
     Destination, Frame, HeaderFilter, HeaderValue, Headers, MessageId, MessageKind, Namespace,
     PeerId, RequestPolicy, RetryPolicy, Status,
@@ -1355,7 +1355,7 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bus_policy::{AllowAll, Policy};
+    use busd_policy::{AllowAll, Policy};
 
     fn credentials() -> Credentials {
         Credentials {
@@ -1425,7 +1425,7 @@ mod tests {
         let error = broker.connect(
             credentials(),
             ClientHello {
-                headers: [("peer.uid".into(), bus_protocol::HeaderValue::Unsigned(0))].into(),
+                headers: [("peer.uid".into(), busd_protocol::HeaderValue::Unsigned(0))].into(),
                 ..ClientHello::default()
             },
         );
@@ -1493,7 +1493,7 @@ mod tests {
         let result = broker.connect(
             credentials(),
             ClientHello {
-                headers: [("client.uid".into(), bus_protocol::HeaderValue::Unsigned(0))].into(),
+                headers: [("client.uid".into(), busd_protocol::HeaderValue::Unsigned(0))].into(),
                 ..ClientHello::default()
             },
         );

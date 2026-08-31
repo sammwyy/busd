@@ -17,17 +17,17 @@ path = "src/main.rs"
 
 [features]
 default = ["unix"]
-unix = ["dep:bus-transport-unix"]
-dbus = ["dep:bus-transport-dbus"]
+unix = ["dep:busd-transport-unix"]
+dbus = ["dep:busd-transport-dbus"]
 monitoring = []
 
 [dependencies]
-bus-broker = { path = "../bus-broker", version = "0.1.0" }
+busd-broker = { package = "busd-broker", path = "../bus-broker", version = "0.1.0" }
 busd-client = { package = "busd-client", path = "../bus-client", version = "0.1.0" }
-bus-policy = { path = "../bus-policy", version = "0.1.0" }
-bus-protocol = { path = "../bus-protocol", version = "0.1.0" }
-bus-transport-unix = { path = "../bus-transport-unix", version = "0.1.0", optional = true }
-bus-transport-dbus = { path = "../bus-transport-dbus", version = "0.1.0", optional = true }
+busd-policy = { package = "busd-policy", path = "../bus-policy", version = "0.1.0" }
+busd-protocol = { package = "busd-protocol", path = "../bus-protocol", version = "0.1.0" }
+busd-transport-unix = { package = "busd-transport-unix", path = "../bus-transport-unix", version = "0.1.0", optional = true }
+busd-transport-dbus = { package = "busd-transport-dbus", path = "../bus-transport-dbus", version = "0.1.0", optional = true }
 
 [dev-dependencies]
 busd-client = { package = "busd-client", path = "../bus-client", version = "0.1.0" }

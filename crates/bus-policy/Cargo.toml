@@ -1,5 +1,5 @@
 [package]
-name = "bus-policy"
+name = "busd-policy"
 description = "Authorization interfaces for the BUS/1 broker."
 version.workspace = true
 edition.workspace = true
@@ -12,7 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-bus-protocol = { path = "../bus-protocol", version = "0.1.0" }
+busd-protocol = { package = "busd-protocol", path = "../bus-protocol", version = "0.1.0" }
 
 [lints]
 workspace = true

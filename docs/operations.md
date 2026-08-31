@@ -6,7 +6,7 @@ by default.
 
 ## Policy format
 
-`bus-policy` parses the line-oriented, versioned `busd-policy/1` format. The
+`busd-policy` parses the line-oriented, versioned `busd-policy/1` format. The
 file must start with `version = 1`; its `default` decision is used when no rule
 matches. Rules are evaluated in file order, so place specific denies before
 broader allows. Values may be double-quoted when they contain whitespace.

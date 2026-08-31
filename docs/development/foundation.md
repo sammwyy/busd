@@ -26,22 +26,22 @@ convenience.
 
 ```text
 busd (binary assembly)
- ├── bus-broker (broker state and routing)
- │    ├── bus-policy (authorization boundary)
- │    └── bus-protocol (transport-independent model and future codec)
- ├── bus-client (public application API)
- │    ├── bus-protocol
- │    └── bus-transport-unix (native connection setup)
- └── bus-transport-unix (Linux socket primitives)
+ ├── busd-broker (broker state and routing)
+ │    ├── busd-policy (authorization boundary)
+ │    └── busd-protocol (transport-independent model and future codec)
+ ├── busd-client (public application API)
+ │    ├── busd-protocol
+ │    └── busd-transport-unix (native connection setup)
+ └── busd-transport-unix (Linux socket primitives)
 ```
 
 | Crate | Owns | Must not own |
 | --- | --- | --- |
-| `bus-protocol` | Transport-independent types and the BUS/1-preview codec | Sockets, broker state, policy, or D-Bus integration |
-| `bus-policy` | Authenticated credentials and authorization decisions | Socket credential collection or message routing |
-| `bus-broker` | Peer lifecycle, namespaces, subscriptions, routing, and delivery state | Listener lifecycle or application payload semantics |
-| `bus-transport-unix` | Linux `AF_UNIX` transport, packet boundaries, and future FD passing | BUS routing and policy decisions |
-| `bus-client` | Stable application-facing API and connection orchestration | A second wire protocol or direct broker-state access |
+| `busd-protocol` | Transport-independent types and the BUS/1-preview codec | Sockets, broker state, policy, or D-Bus integration |
+| `busd-policy` | Authenticated credentials and authorization decisions | Socket credential collection or message routing |
+| `busd-broker` | Peer lifecycle, namespaces, subscriptions, routing, and delivery state | Listener lifecycle or application payload semantics |
+| `busd-transport-unix` | Linux `AF_UNIX` transport, packet boundaries, and future FD passing | BUS routing and policy decisions |
+| `busd-client` | Stable application-facing API and connection orchestration | A second wire protocol or direct broker-state access |
 | `busd` | Process startup, configuration, transport wiring, and operations | Protocol model or business API semantics |
 
 The native transport is the only crate allowed to contain the small, audited
@@ -52,11 +52,11 @@ unsafe FFI boundary needed for Linux sockets. All other crates remain
 
 The current implementation is a scaffold, not a complete BUS/1 broker:
 
-- `bus-protocol` owns the versioned BUS/1-preview ABI, canonical codec, and
+- `busd-protocol` owns the versioned BUS/1-preview ABI, canonical codec, and
   packet validation limits.
-- `bus-broker` stores peers, exclusive namespace ownership, and unowned channel
+- `busd-broker` stores peers, exclusive namespace ownership, and unowned channel
   subscriptions, but does not execute routed messages.
-- `bus-transport-unix` preserves bounded native packet boundaries below the
+- `busd-transport-unix` preserves bounded native packet boundaries below the
   BUS/1 API.
 - `busd` authenticates Unix peers, routes namespace, direct, client-ID, channel,
   and authorized broadcast messages, manages in-flight request and acknowledged

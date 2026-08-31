@@ -1,5 +1,5 @@
 [package]
-name = "bus-broker"
+name = "busd-broker"
 description = "In-memory peer, namespace, and subscription state for BUS/1."
 version.workspace = true
 edition.workspace = true
@@ -12,8 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-bus-policy = { path = "../bus-policy", version = "0.1.0" }
-bus-protocol = { path = "../bus-protocol", version = "0.1.0" }
+busd-policy = { package = "busd-policy", path = "../bus-policy", version = "0.1.0" }
+busd-protocol = { package = "busd-protocol", path = "../bus-protocol", version = "0.1.0" }
 
 [lints]
 workspace = true

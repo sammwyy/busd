@@ -42,12 +42,12 @@ See the [BUS/1-preview wire protocol](docs/wire-protocol.md) for the packet ABI.
 
 ## Workspace
 
-- `bus-protocol`: transport-independent BUS/1 model and preview codec.
+- `busd-protocol`: transport-independent BUS/1 model and preview codec.
 - `busd-client`: application-facing dependency; it re-exports BUS/1 types and opens native connections.
-- `bus-policy`: authorization boundary and authenticated credentials.
-- `bus-broker`: in-memory peers, exclusive namespaces, and channel subscriptions.
-- `bus-transport-unix`: Linux native socket primitives.
-- `bus-transport-dbus`: optional direct D-Bus connections and name registration.
+- `busd-policy`: authorization boundary and authenticated credentials.
+- `busd-broker`: in-memory peers, exclusive namespaces, and channel subscriptions.
+- `busd-transport-unix`: Linux native socket primitives.
+- `busd-transport-dbus`: optional direct D-Bus connections and name registration.
 - `busd-server`: broker executable assembly.
 
 ## Scope
@@ -68,7 +68,7 @@ println!("connected as {}", bus.peer_id());
 bus.disconnect()?;
 ```
 
-Applications that need direct D-Bus access may opt into `bus-transport-dbus`.
+Applications that need direct D-Bus access may opt into `busd-transport-dbus`.
 It provides transport primitives only; mapping D-Bus methods to BUS APIs is a
 separate semantic adapter. The `busd` binary keeps D-Bus disabled unless built
 with `--features dbus`.
