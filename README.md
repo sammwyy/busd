@@ -15,7 +15,7 @@ until a negotiated protocol extension defines their forwarding semantics.
 Rust 1.85 or newer is required.
 
 ```bash
-cargo run -p busd -- daemon --socket /tmp/busd.sock
+cargo run -p busd-server -- daemon --socket /tmp/busd.sock
 ```
 
 The built-in daemon policy permits ordinary local messaging but denies broadcast,
@@ -32,7 +32,7 @@ The default socket is `/run/busd/busd.sock`; its parent directory must be manage
 
 ## Client status
 
-`bus-client` opens an authenticated native session, performs `HELLO`/`WELCOME`,
+`busd-client` opens an authenticated native session, performs `HELLO`/`WELCOME`,
 supports typed signals, requests, responses, claims, subscriptions, namespace
 resolution, acknowledgements, and bounded receiver-side deduplication. Use
 `ReconnectingBus` when a client must restore claims and subscriptions after a
@@ -43,12 +43,12 @@ See the [BUS/1-preview wire protocol](docs/wire-protocol.md) for the packet ABI.
 ## Workspace
 
 - `bus-protocol`: transport-independent BUS/1 model and preview codec.
-- `bus-client`: application-facing dependency; it re-exports BUS/1 types and opens native connections.
+- `busd-client`: application-facing dependency; it re-exports BUS/1 types and opens native connections.
 - `bus-policy`: authorization boundary and authenticated credentials.
 - `bus-broker`: in-memory peers, exclusive namespaces, and channel subscriptions.
 - `bus-transport-unix`: Linux native socket primitives.
 - `bus-transport-dbus`: optional direct D-Bus connections and name registration.
-- `busd`: broker executable assembly.
+- `busd-server`: broker executable assembly.
 
 ## Scope
 
@@ -58,7 +58,7 @@ See the [documentation index](docs/README.md) for the project documentation,
 the [BUS/1 specification](docs/SPECS.md) for the design, and
 [ROADMAP.md](ROADMAP.md) for implementation milestones.
 
-Applications should depend on `bus-client`, not the transport crate directly:
+Applications should depend on `busd-client`, not the transport crate directly:
 
 ```rust
 use bus_client::{Bus, ConnectOptions};

@@ -12,7 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-bus-protocol = { path = "../bus-protocol" }
+bus-protocol = { path = "../bus-protocol", version = "0.1.0" }
 
 [lints]
 workspace = true

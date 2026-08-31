@@ -6,7 +6,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bus_client::{
+use busd_client::{
     AckPolicy, AckRequirement, Bus, Channel, ClientId, ConnectOptions, DeliveryOutcome,
     Destination, Frame, HeaderFilter, HeaderValue, MessageId, MessageKind, Namespace,
     ReconnectingBus, RequestPolicy, RetryPolicy, Status,
@@ -172,7 +172,7 @@ fn requests_acknowledgements_and_no_recipient_outcomes_work_over_native_sockets(
                 request_policy: RequestPolicy::Exact,
                 deadline_ms: 0,
                 retry: RetryPolicy::None,
-                destination: Destination::Peer(bus_client::PeerId::new(*sender)),
+                destination: Destination::Peer(busd_client::PeerId::new(*sender)),
                 message_id: MessageId::new([22; 16]),
                 correlation_id: message_id,
                 status: Status::Success,
@@ -233,7 +233,7 @@ fn requests_acknowledgements_and_no_recipient_outcomes_work_over_native_sockets(
             Destination::Namespace(Namespace::parse("bus://missing").unwrap()),
             MessageId::new([23; 16]),
         )),
-        Err(bus_client::Error::Delivery(DeliveryOutcome::NoRecipient))
+        Err(busd_client::Error::Delivery(DeliveryOutcome::NoRecipient))
     ));
     consumer.disconnect().unwrap();
 }
@@ -326,10 +326,10 @@ fn message(destination: Destination, payload: &[u8]) -> Frame {
     Frame::Message {
         kind: MessageKind::Signal,
         ack_policy: AckPolicy::None,
-        ack_requirement: bus_client::AckRequirement::None,
-        request_policy: bus_client::RequestPolicy::Exact,
+        ack_requirement: busd_client::AckRequirement::None,
+        request_policy: busd_client::RequestPolicy::Exact,
         deadline_ms: 0,
-        retry: bus_client::RetryPolicy::None,
+        retry: busd_client::RetryPolicy::None,
         destination,
         message_id: MessageId::new([7; 16]),
         correlation_id: MessageId::absent(),

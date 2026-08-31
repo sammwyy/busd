@@ -12,8 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-bus-policy = { path = "../bus-policy" }
-bus-protocol = { path = "../bus-protocol" }
+bus-policy = { path = "../bus-policy", version = "0.1.0" }
+bus-protocol = { path = "../bus-protocol", version = "0.1.0" }
 
 [lints]
 workspace = true
