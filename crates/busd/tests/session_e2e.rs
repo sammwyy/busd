@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "unix"))]
 
 use std::path::PathBuf;
 use std::process::{self, Command};

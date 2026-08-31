@@ -194,14 +194,14 @@ layers. Checkboxes record repository status, not an estimated schedule.
 
 **Exit criteria**
 
-- [ ] Native BUS/1 remains usable and stable when every optional feature is disabled.
-- [ ] Compatibility work does not make D-Bus or Freedesktop naming conventions mandatory for BUS APIs.
+- [x] Native BUS/1 remains usable and stable when every optional feature is disabled.
+- [x] Compatibility work does not make D-Bus or Freedesktop naming conventions mandatory for BUS APIs.
 
 ## Definition of done for a milestone
 
-- [ ] Public behavior is specified in `docs/` and represented by tests.
-- [ ] API and wire compatibility impact is documented.
-- [ ] Errors, limits, authorization, and cleanup paths have test coverage.
-- [ ] `cargo fmt --check`, `cargo clippy --workspace --all-targets`, and
+- [x] Public behavior is specified in `docs/` and represented by tests.
+- [x] API and wire compatibility impact is documented.
+- [x] Errors, limits, authorization, and cleanup paths have test coverage.
+- [x] `cargo fmt --check`, `cargo clippy --workspace --all-targets`, and
   `cargo test --workspace` pass.
-- [ ] The README and relevant examples describe only supported behavior.
+- [x] The README and relevant examples describe only supported behavior.

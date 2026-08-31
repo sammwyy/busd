@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "unix"), allow(dead_code))]
+#![cfg_attr(not(feature = "unix"), allow(unused_imports))]
 
 use std::collections::BTreeMap;
 use std::env;

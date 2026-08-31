@@ -47,6 +47,7 @@ See the [BUS/1-preview wire protocol](docs/wire-protocol.md) for the packet ABI.
 - `bus-policy`: authorization boundary and authenticated credentials.
 - `bus-broker`: in-memory peers, exclusive namespaces, and channel subscriptions.
 - `bus-transport-unix`: Linux native socket primitives.
+- `bus-transport-dbus`: optional direct D-Bus connections and name registration.
 - `busd`: broker executable assembly.
 
 ## Scope
@@ -66,6 +67,11 @@ let bus = Bus::connect(ConnectOptions::new("/run/busd/busd.sock"))?;
 println!("connected as {}", bus.peer_id());
 bus.disconnect()?;
 ```
+
+Applications that need direct D-Bus access may opt into `bus-transport-dbus`.
+It provides transport primitives only; mapping D-Bus methods to BUS APIs is a
+separate semantic adapter. The `busd` binary keeps D-Bus disabled unless built
+with `--features dbus`.
 
 For a reconnecting client, retain durable session state in the public client
 wrapper:
