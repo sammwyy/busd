@@ -5,7 +5,7 @@
 use std::ffi::{c_char, c_void};
 use std::io;
 use std::mem::{MaybeUninit, offset_of};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -14,10 +14,14 @@ const SOCK_SEQPACKET: i32 = 5;
 const SOCK_CLOEXEC: i32 = 0o2_000_000;
 const MSG_NOSIGNAL: i32 = 0x4000;
 const MSG_TRUNC: i32 = 0x20;
+const MSG_CMSG_CLOEXEC: i32 = 0x4000_0000;
+const MSG_CTRUNC: i32 = 0x8;
 const SOL_SOCKET: i32 = 1;
 const SO_PEERCRED: i32 = 17;
 const SHUT_RDWR: i32 = 2;
 const SUN_PATH_CAPACITY: usize = 108;
+/// Maximum number of descriptors accepted in one native packet.
+pub const MAX_FILE_DESCRIPTORS: usize = 16;
 
 #[repr(C)]
 struct SockAddrUn {
@@ -32,6 +36,30 @@ struct UCred {
     gid: u32,
 }
 
+#[repr(C)]
+struct Iovec {
+    base: *mut u8,
+    length: usize,
+}
+
+#[repr(C)]
+struct MessageHeader {
+    name: *mut (),
+    name_length: u32,
+    iov: *mut Iovec,
+    iov_length: usize,
+    control: *mut c_void,
+    control_length: usize,
+    flags: i32,
+}
+
+#[repr(C)]
+struct ControlMessageHeader {
+    length: usize,
+    level: i32,
+    message_type: i32,
+}
+
 unsafe extern "C" {
     fn socket(domain: i32, socket_type: i32, protocol: i32) -> i32;
     fn bind(socket: i32, address: *const SockAddrUn, address_length: u32) -> i32;
@@ -39,7 +67,8 @@ unsafe extern "C" {
     fn listen(socket: i32, backlog: i32) -> i32;
     fn accept4(socket: i32, address: *mut (), address_length: *mut u32, flags: i32) -> i32;
     fn send(socket: i32, buffer: *const u8, length: usize, flags: i32) -> isize;
-    fn recv(socket: i32, buffer: *mut u8, length: usize, flags: i32) -> isize;
+    fn sendmsg(socket: i32, message: *const MessageHeader, flags: i32) -> isize;
+    fn recvmsg(socket: i32, message: *mut MessageHeader, flags: i32) -> isize;
     fn getsockopt(
         socket: i32,
         level: i32,
@@ -49,6 +78,21 @@ unsafe extern "C" {
     ) -> i32;
     fn shutdown(socket: i32, how: i32) -> i32;
     fn dup(oldfd: i32) -> i32;
+}
+
+const SCM_RIGHTS: i32 = 1;
+const SOL_SOCKET_CMSG: i32 = 1;
+
+const fn cmsg_align(length: usize) -> usize {
+    (length + std::mem::align_of::<usize>() - 1) & !(std::mem::align_of::<usize>() - 1)
+}
+
+const fn cmsg_space(length: usize) -> usize {
+    cmsg_align(std::mem::size_of::<ControlMessageHeader>()) + cmsg_align(length)
+}
+
+const fn cmsg_len(length: usize) -> usize {
+    std::mem::size_of::<ControlMessageHeader>() + length
 }
 
 #[cfg(test)]
@@ -104,22 +148,74 @@ impl Connection {
                 MSG_NOSIGNAL,
             )
         };
-        if written < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if written as usize != packet.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "native packet was not sent completely",
-            ));
-        }
-        Ok(())
+        check_packet_write(written, packet.len())
     }
 
-    /// Receives one packet, up to `maximum_size` bytes.
+    /// Sends one complete native packet with borrowed file descriptors.
     ///
-    /// Returns `None` when the peer disconnects.
-    pub fn receive_packet(&self, maximum_size: usize) -> io::Result<Option<Vec<u8>>> {
+    /// The descriptors remain owned by the caller. At most
+    /// [`MAX_FILE_DESCRIPTORS`] descriptors may accompany one packet.
+    pub fn send_packet_with_fds(
+        &self,
+        packet: &[u8],
+        descriptors: &[BorrowedFd<'_>],
+    ) -> io::Result<()> {
+        validate_packet(packet)?;
+        if descriptors.len() > MAX_FILE_DESCRIPTORS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many file descriptors in native packet",
+            ));
+        }
+        if descriptors.is_empty() {
+            return self.send_packet(packet);
+        }
+        let mut control = vec![0_u8; cmsg_space(std::mem::size_of::<i32>() * descriptors.len())];
+        let header = control.as_mut_ptr().cast::<ControlMessageHeader>();
+        unsafe {
+            (*header).length = cmsg_len(std::mem::size_of::<i32>() * descriptors.len());
+            (*header).level = SOL_SOCKET_CMSG;
+            (*header).message_type = SCM_RIGHTS;
+            let destination = control
+                .as_mut_ptr()
+                .add(cmsg_align(std::mem::size_of::<ControlMessageHeader>()))
+                .cast::<i32>();
+            for (index, descriptor) in descriptors.iter().enumerate() {
+                *destination.add(index) = descriptor.as_raw_fd();
+            }
+            let mut iovec = Iovec {
+                base: packet.as_ptr() as *mut u8,
+                length: packet.len(),
+            };
+            let message = MessageHeader {
+                name: std::ptr::null_mut(),
+                name_length: 0,
+                iov: &mut iovec,
+                iov_length: 1,
+                control: control.as_mut_ptr().cast(),
+                control_length: control.len(),
+                flags: 0,
+            };
+            let written = sendmsg(self.fd.as_raw_fd(), &message, MSG_NOSIGNAL);
+            check_packet_write(written, packet.len())
+        }
+    }
+
+    /// Receives one packet and its owned ancillary file descriptors.
+    ///
+    /// A packet carrying more than `maximum_descriptors` descriptors is
+    /// rejected and all received descriptors are closed with their owners.
+    pub fn receive_packet_with_fds(
+        &self,
+        maximum_size: usize,
+        maximum_descriptors: usize,
+    ) -> io::Result<Option<(Vec<u8>, Vec<OwnedFd>)>> {
+        if maximum_descriptors > MAX_FILE_DESCRIPTORS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "configured descriptor limit exceeds native transport limit",
+            ));
+        }
         if maximum_size == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -127,12 +223,25 @@ impl Connection {
             ));
         }
         let mut packet = vec![0; maximum_size];
+        let mut control = vec![0_u8; cmsg_space(std::mem::size_of::<i32>() * maximum_descriptors)];
+        let mut iovec = Iovec {
+            base: packet.as_mut_ptr(),
+            length: packet.len(),
+        };
+        let mut message = MessageHeader {
+            name: std::ptr::null_mut(),
+            name_length: 0,
+            iov: &mut iovec,
+            iov_length: 1,
+            control: control.as_mut_ptr().cast(),
+            control_length: control.len(),
+            flags: 0,
+        };
         let received = unsafe {
-            recv(
+            recvmsg(
                 self.fd.as_raw_fd(),
-                packet.as_mut_ptr(),
-                packet.len(),
-                MSG_TRUNC,
+                &mut message,
+                MSG_TRUNC | MSG_CMSG_CLOEXEC,
             )
         };
         if received < 0 {
@@ -147,7 +256,38 @@ impl Connection {
                 "native packet exceeds the configured maximum size",
             ));
         }
+        if message.flags & MSG_CTRUNC != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native packet contains too many file descriptors",
+            ));
+        }
         packet.truncate(received as usize);
+        let descriptors = unsafe { parse_descriptors(&control, message.control_length)? };
+        if descriptors.len() > maximum_descriptors {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native packet contains too many file descriptors",
+            ));
+        }
+        Ok(Some((packet, descriptors)))
+    }
+
+    /// Receives one packet, up to `maximum_size` bytes, without descriptors.
+    ///
+    /// Returns `None` when the peer disconnects. Packets carrying descriptors
+    /// are rejected because dropping them without an explicit ownership rule
+    /// would leak the received descriptors.
+    pub fn receive_packet(&self, maximum_size: usize) -> io::Result<Option<Vec<u8>>> {
+        let Some((packet, descriptors)) = self.receive_packet_with_fds(maximum_size, 0)? else {
+            return Ok(None);
+        };
+        if !descriptors.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native packet unexpectedly contains file descriptors",
+            ));
+        }
         Ok(Some(packet))
     }
 
@@ -295,6 +435,65 @@ fn socket_address(path: &Path) -> io::Result<(SockAddrUn, u32)> {
     Ok((address, length))
 }
 
+fn validate_packet(packet: &[u8]) -> io::Result<()> {
+    if packet.is_empty() {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native packets must not be empty",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_packet_write(written: isize, expected: usize) -> io::Result<()> {
+    if written < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if written as usize != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "native packet was not sent completely",
+        ));
+    }
+    Ok(())
+}
+
+unsafe fn parse_descriptors(control: &[u8], control_length: usize) -> io::Result<Vec<OwnedFd>> {
+    let mut descriptors = Vec::new();
+    let mut offset = 0;
+    while offset + std::mem::size_of::<ControlMessageHeader>() <= control_length {
+        let header = unsafe { &*(control.as_ptr().add(offset).cast::<ControlMessageHeader>()) };
+        if header.length < cmsg_len(0) || offset + header.length > control_length {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native packet contains malformed control data",
+            ));
+        }
+        if header.level == SOL_SOCKET_CMSG && header.message_type == SCM_RIGHTS {
+            let bytes = header.length - cmsg_len(0);
+            if bytes % std::mem::size_of::<i32>() != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native packet contains malformed file descriptors",
+                ));
+            }
+            let data = unsafe {
+                control
+                    .as_ptr()
+                    .add(offset + cmsg_align(std::mem::size_of::<ControlMessageHeader>()))
+                    .cast::<i32>()
+            };
+            for index in 0..bytes / std::mem::size_of::<i32>() {
+                let descriptor = unsafe { *data.add(index) };
+                descriptors.push(unsafe { OwnedFd::from_raw_fd(descriptor) });
+            }
+        }
+        offset += cmsg_align(header.length);
+    }
+    Ok(descriptors)
+}
+
 impl AsRawFd for Listener {
     fn as_raw_fd(&self) -> i32 {
         self.fd.as_raw_fd()
@@ -304,6 +503,8 @@ impl AsRawFd for Listener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use std::os::fd::AsFd;
     use std::process;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -331,6 +532,33 @@ mod tests {
         assert_eq!(credentials.uid, unsafe { getuid() });
         assert_eq!(credentials.gid, unsafe { getgid() });
         assert_eq!(packet, [0xde, 0xad, 0xbe, 0xef]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn connection_transfers_owned_file_descriptors() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("busd-fd-{}-{nonce}.sock", process::id()));
+        let listener = Listener::bind(&path).unwrap();
+        let accepted = thread::spawn(move || {
+            let peer = listener.accept().unwrap();
+            let (packet, descriptors) = peer.receive_packet_with_fds(64, 1).unwrap().unwrap();
+            (packet, descriptors.len(), descriptors[0].as_raw_fd())
+        });
+
+        let connection = Connection::connect(&path).unwrap();
+        let file = File::open("/dev/null").unwrap();
+        connection
+            .send_packet_with_fds(b"fd", &[file.as_fd()])
+            .unwrap();
+        let (packet, count, descriptor) = accepted.join().unwrap();
+
+        assert_eq!(packet, b"fd");
+        assert_eq!(count, 1);
+        assert!(descriptor >= 0);
         std::fs::remove_file(path).unwrap();
     }
 }
