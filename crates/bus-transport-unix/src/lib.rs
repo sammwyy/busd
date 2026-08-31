@@ -365,6 +365,9 @@ impl Listener {
     /// The path must not already exist. This avoids unlinking an unknown socket.
     pub fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         if path.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
