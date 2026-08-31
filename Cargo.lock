@@ -179,14 +179,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bus-client"
-version = "0.1.0"
-dependencies = [
- "bus-protocol",
- "bus-transport-unix",
-]
-
-[[package]]
 name = "bus-policy"
 version = "0.1.0"
 dependencies = [
@@ -209,15 +201,23 @@ name = "bus-transport-unix"
 version = "0.1.0"
 
 [[package]]
-name = "busd"
+name = "busd-client"
+version = "0.1.0"
+dependencies = [
+ "bus-protocol",
+ "bus-transport-unix",
+]
+
+[[package]]
+name = "busd-server"
 version = "0.1.0"
 dependencies = [
  "bus-broker",
- "bus-client",
  "bus-policy",
  "bus-protocol",
  "bus-transport-dbus",
  "bus-transport-unix",
+ "busd-client",
 ]
 
 [[package]]
