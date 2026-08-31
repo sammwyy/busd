@@ -166,7 +166,8 @@ layers. Checkboxes record repository status, not an estimated schedule.
 - [x] Implement reconnection helpers that restore headers, namespace claims, and subscriptions while accepting a new peer ID.
 - [x] Support `SCM_RIGHTS` file-descriptor passing with strict descriptor-count and
   ownership rules.
-- [x] Define memfd-based large-payload transfer as an optional negotiated capability.
+- [x] Reserve memfd-based large-payload transfer as an optional negotiated capability;
+  keep it explicitly unavailable until forwarding and ownership semantics are defined.
 - [x] Add end-to-end integration tests using real Unix sockets and separate processes.
 - [x] Ship a system-service installation example, socket-directory ownership rules,
   and upgrade/restart behavior.
