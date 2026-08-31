@@ -161,22 +161,22 @@ layers. Checkboxes record repository status, not an estimated schedule.
 
 **Milestone:** M4 — Secure native 1.0.
 
-- [ ] Provide ergonomic typed client operations for claims, discovery, subscriptions,
+- [x] Provide ergonomic typed client operations for claims, discovery, subscriptions,
   signals, requests, responses, and acknowledgements.
-- [ ] Implement reconnection helpers that restore headers, namespace claims, and subscriptions while accepting a new peer ID.
-- [ ] Support `SCM_RIGHTS` file-descriptor passing with strict descriptor-count and
+- [x] Implement reconnection helpers that restore headers, namespace claims, and subscriptions while accepting a new peer ID.
+- [x] Support `SCM_RIGHTS` file-descriptor passing with strict descriptor-count and
   ownership rules.
-- [ ] Define memfd-based large-payload transfer as an optional negotiated capability.
-- [ ] Add end-to-end integration tests using real Unix sockets and separate processes.
-- [ ] Ship a system-service installation example, socket-directory ownership rules,
+- [x] Define memfd-based large-payload transfer as an optional negotiated capability.
+- [x] Add end-to-end integration tests using real Unix sockets and separate processes.
+- [x] Ship a system-service installation example, socket-directory ownership rules,
   and upgrade/restart behavior.
-- [ ] Replace debug-client documentation with supported typed-client examples.
+- [x] Replace debug-client documentation with supported typed-client examples.
 
 **Exit criteria**
 
-- [ ] A production client can use the public library without touching raw transport packets.
-- [ ] FD passing and large-payload support are either safely negotiated or explicitly unavailable.
-- [ ] Restart and reconnect behavior is tested and documented.
+- [x] A production client can use the public library without touching raw transport packets.
+- [x] FD passing and large-payload support are either safely negotiated or explicitly unavailable.
+- [x] Restart and reconnect behavior is tested and documented.
 
 ## Phase 7 — Compatibility and optional extensions
 
