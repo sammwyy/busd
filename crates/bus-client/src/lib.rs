@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 pub use bus_protocol::*;
 use bus_transport_unix::Connection;
 
+/// Capability name for native `SCM_RIGHTS` support.
+pub const CAPABILITY_FD_PASSING: &str = "fd-passing";
+/// Reserved capability name for a future negotiated memfd payload extension.
+pub const CAPABILITY_MEMFD_PAYLOAD: &str = "memfd-payload-v1";
+
 /// Configuration for connecting to a local broker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectOptions {
@@ -77,6 +82,24 @@ impl Default for ConnectOptions {
     }
 }
 
+/// A durable namespace claim to restore after reconnecting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamespaceClaim {
+    /// Namespace to claim.
+    pub namespace: Namespace,
+    /// Metadata associated with the claim.
+    pub headers: Headers,
+}
+
+/// A durable channel subscription to restore after reconnecting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Subscription {
+    /// Channel to subscribe to.
+    pub channel: Channel,
+    /// Structural message filters.
+    pub filters: Vec<HeaderFilter>,
+}
+
 /// A bounded receiver-side logical-message deduplication cache.
 ///
 /// It helps applications make retried acknowledged messages idempotent, but it
@@ -137,6 +160,93 @@ pub struct Bus {
     capabilities: Capabilities,
 }
 
+/// A native client that restores its session state after reconnecting.
+pub struct ReconnectingBus {
+    bus: Bus,
+    options: ConnectOptions,
+    claims: Vec<NamespaceClaim>,
+    subscriptions: Vec<Subscription>,
+}
+
+impl ReconnectingBus {
+    /// Opens a reconnecting native client.
+    pub fn connect(options: ConnectOptions) -> Result<Self, Error> {
+        Ok(Self {
+            bus: Bus::connect(options.clone())?,
+            options,
+            claims: Vec::new(),
+            subscriptions: Vec::new(),
+        })
+    }
+
+    /// Returns the currently assigned broker peer ID.
+    #[must_use]
+    pub const fn peer_id(&self) -> PeerId {
+        self.bus.peer_id()
+    }
+
+    /// Returns the active negotiated capabilities.
+    #[must_use]
+    pub fn capabilities(&self) -> &Capabilities {
+        self.bus.capabilities()
+    }
+
+    /// Returns the underlying application-facing client.
+    #[must_use]
+    pub const fn bus(&self) -> &Bus {
+        &self.bus
+    }
+
+    /// Claims a namespace and records it for future reconnects.
+    pub fn claim(&mut self, namespace: Namespace, headers: Headers) -> Result<(), Error> {
+        self.bus
+            .claim_with_headers(namespace.clone(), headers.clone())?;
+        self.claims.push(NamespaceClaim { namespace, headers });
+        Ok(())
+    }
+
+    /// Subscribes to a channel and records it for future reconnects.
+    pub fn subscribe(&mut self, channel: Channel, filters: Vec<HeaderFilter>) -> Result<(), Error> {
+        self.bus.subscribe(channel.clone(), filters.clone())?;
+        self.subscriptions.push(Subscription { channel, filters });
+        Ok(())
+    }
+
+    /// Removes a subscription and stops restoring it after reconnects.
+    pub fn unsubscribe(&mut self, channel: Channel) -> Result<(), Error> {
+        self.bus.unsubscribe(channel.clone())?;
+        self.subscriptions
+            .retain(|subscription| subscription.channel != channel);
+        Ok(())
+    }
+
+    /// Opens a new session and restores claims and subscriptions in order.
+    ///
+    /// The broker is allowed to assign a different peer ID. State is retained
+    /// locally if reconnecting or restoration fails.
+    pub fn reconnect(&mut self) -> Result<PeerId, Error> {
+        let bus = Bus::connect(self.options.clone())?;
+        for claim in &self.claims {
+            bus.claim_with_headers(claim.namespace.clone(), claim.headers.clone())?;
+        }
+        for subscription in &self.subscriptions {
+            bus.subscribe(subscription.channel.clone(), subscription.filters.clone())?;
+        }
+        self.bus = bus;
+        Ok(self.peer_id())
+    }
+
+    /// Receives and decodes one application frame.
+    pub fn receive_frame(&self) -> Result<Option<Frame>, Error> {
+        self.bus.receive_frame()
+    }
+
+    /// Closes the active native session.
+    pub fn disconnect(self) -> Result<(), Error> {
+        self.bus.disconnect()
+    }
+}
+
 impl Bus {
     /// Opens the native transport connection to a broker.
     pub fn connect(options: ConnectOptions) -> Result<Self, Error> {
@@ -189,13 +299,12 @@ impl Bus {
 
     /// Claims `namespace` for this connected peer.
     pub fn claim(&self, namespace: Namespace) -> Result<(), Error> {
-        self.send_control(
-            Frame::Claim {
-                namespace,
-                headers: Headers::new(),
-            },
-            ControlOperation::Claim,
-        )
+        self.claim_with_headers(namespace, Headers::new())
+    }
+
+    /// Claims `namespace` with application metadata for this connected peer.
+    pub fn claim_with_headers(&self, namespace: Namespace, headers: Headers) -> Result<(), Error> {
+        self.send_control(Frame::Claim { namespace, headers }, ControlOperation::Claim)
     }
 
     /// Subscribes this peer to a channel using structural message-header filters.
@@ -240,6 +349,81 @@ impl Bus {
             return Err(Error::Handshake("send_message requires a MESSAGE frame"));
         }
         self.send_frame(message)
+    }
+
+    /// Sends a one-way signal with the standard successful status.
+    pub fn send_signal(
+        &self,
+        destination: Destination,
+        message_id: MessageId,
+        headers: Headers,
+        payload: Vec<u8>,
+    ) -> Result<(), Error> {
+        self.send_message(&Frame::Message {
+            kind: MessageKind::Signal,
+            ack_policy: AckPolicy::None,
+            ack_requirement: AckRequirement::None,
+            request_policy: RequestPolicy::Exact,
+            deadline_ms: 0,
+            retry: RetryPolicy::None,
+            destination,
+            message_id,
+            correlation_id: MessageId::absent(),
+            status: Status::Success,
+            headers,
+            payload,
+        })
+    }
+
+    /// Sends a request with a relative deadline and waits for its response.
+    pub fn request_message(
+        &self,
+        destination: Destination,
+        message_id: MessageId,
+        deadline_ms: u32,
+        headers: Headers,
+        payload: Vec<u8>,
+    ) -> Result<Frame, Error> {
+        self.request(&Frame::Message {
+            kind: MessageKind::Request,
+            ack_policy: AckPolicy::None,
+            ack_requirement: AckRequirement::None,
+            request_policy: RequestPolicy::Exact,
+            deadline_ms,
+            retry: RetryPolicy::None,
+            destination,
+            message_id,
+            correlation_id: MessageId::absent(),
+            status: Status::Success,
+            headers,
+            payload,
+        })
+    }
+
+    /// Sends a response correlated to a request.
+    pub fn send_response(
+        &self,
+        destination: Destination,
+        message_id: MessageId,
+        correlation_id: MessageId,
+        status: Status,
+        headers: Headers,
+        payload: Vec<u8>,
+    ) -> Result<(), Error> {
+        self.send_message(&Frame::Message {
+            kind: MessageKind::Response,
+            ack_policy: AckPolicy::None,
+            ack_requirement: AckRequirement::None,
+            request_policy: RequestPolicy::Exact,
+            deadline_ms: 0,
+            retry: RetryPolicy::None,
+            destination,
+            message_id,
+            correlation_id,
+            status,
+            headers,
+            payload,
+        })
     }
 
     /// Confirms that this peer received or processed a routed logical message.
