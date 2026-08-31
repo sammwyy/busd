@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bus_client::{
     AckPolicy, AckRequirement, Bus, Channel, ClientId, ConnectOptions, DeliveryOutcome,
     Destination, Frame, HeaderFilter, HeaderValue, MessageId, MessageKind, Namespace,
-    RequestPolicy, RetryPolicy, Status,
+    ReconnectingBus, RequestPolicy, RetryPolicy, Status,
 };
 
 struct Daemon {
@@ -239,6 +239,34 @@ fn requests_acknowledgements_and_no_recipient_outcomes_work_over_native_sockets(
 }
 
 #[test]
+fn reconnect_restores_claims_and_subscriptions_after_daemon_restart() {
+    let first_daemon = start_daemon("reconnect");
+    let namespace = Namespace::parse("bus://reconnect").unwrap();
+    let channel = Channel::parse("reconnect-events").unwrap();
+    let mut client = ReconnectingBus::connect(ConnectOptions::new(&first_daemon.socket)).unwrap();
+    let first_peer = client.peer_id();
+    client.claim(namespace.clone(), Default::default()).unwrap();
+    client.subscribe(channel.clone(), Vec::new()).unwrap();
+
+    let mut first_daemon = first_daemon;
+    first_daemon.child.kill().unwrap();
+    first_daemon.child.wait().unwrap();
+    std::fs::remove_file(&first_daemon.socket).unwrap();
+    let second_daemon = start_daemon_at(first_daemon.socket.clone());
+    let observer = Bus::connect(ConnectOptions::new(&second_daemon.socket)).unwrap();
+
+    let second_peer = client.reconnect().unwrap();
+    assert_ne!(first_peer, second_peer);
+    assert_eq!(
+        observer.resolve_namespace(namespace).unwrap(),
+        Some(second_peer)
+    );
+    observer.disconnect().unwrap();
+    client.disconnect().unwrap();
+    drop(second_daemon);
+}
+
+#[test]
 fn configured_policy_denies_broadcast_and_health_check_reaches_daemon() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -334,6 +362,10 @@ fn start_daemon(label: &str) -> Daemon {
         .unwrap()
         .as_nanos();
     let socket = std::env::temp_dir().join(format!("busd-{label}-{}-{nonce}.sock", process::id()));
+    start_daemon_at(socket)
+}
+
+fn start_daemon_at(socket: PathBuf) -> Daemon {
     let child = Command::new(env!("CARGO_BIN_EXE_busd"))
         .args(["daemon", "--socket"])
         .arg(&socket)
