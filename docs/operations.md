@@ -113,6 +113,33 @@ Check that a running daemon accepts native connections with:
 busd health --socket /run/busd/busd.sock
 ```
 
+## Service installation and restart
+
+Install the example unit from [`docs/systemd/busd.service`](systemd/busd.service),
+create the unprivileged `busd` group, and install `/etc/busd/policy.conf` with
+root ownership and mode `0640`. `/run/busd` is created by `RuntimeDirectory`
+with mode `0750`; the daemon owns the socket and the group may connect subject
+to policy. Do not place the socket in a world-writable directory.
+
+The unit removes only `/run/busd/busd.sock` during the serialized systemd
+start transition, allowing a stopped daemon to restart after an unclean exit.
+Clients see the old session close and should use `ReconnectingBus`, which
+replays claims and subscriptions and treats the replacement peer ID as new.
+An upgrade should use `systemctl restart busd`; the integration suite covers
+this stop, socket replacement, reconnect, and state restoration sequence.
+
+## File descriptors and large payloads
+
+The low-level Unix transport supports `SCM_RIGHTS` with a maximum of 16
+descriptors per packet. Sends borrow descriptors; receives return CLOEXEC-owned
+descriptors, and packets over the configured count are rejected. The broker
+does not currently accept or forward descriptor-bearing BUS frames, so the
+public client does not advertise `fd-passing` as a routed application feature.
+
+Memfd payloads are explicitly unavailable in BUS/1-preview. The reserved
+`memfd-payload-v1` capability name must not be offered until a future version
+defines negotiation, descriptor ownership, lifetime, and broker forwarding.
+
 ## Verification
 
 The workspace test suite includes deterministic arbitrary-input coverage for the

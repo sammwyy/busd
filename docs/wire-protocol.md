@@ -198,6 +198,12 @@ supports text and binary values; the other structural filters compare canonical
 header values directly. Direct responses retain their message and correlation
 IDs unchanged, allowing the receiving client to associate them with its request.
 
+The preview client and broker do not negotiate descriptor-bearing messages.
+`bus-transport-unix` exposes a separate bounded `SCM_RIGHTS` primitive for
+transport integrations, but the BUS broker rejects ancillary descriptors on
+normal BUS frames. Memfd payloads are likewise unavailable until a future
+capability defines their complete forwarding and ownership semantics.
+
 ## Reference vectors
 
 The `bus-protocol` test suite contains byte-for-byte vectors for `HELLO` and a

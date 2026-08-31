@@ -1,0 +1,19 @@
+[Unit]
+Description=BUS/1 native message bus
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/busd daemon --socket /run/busd/busd.sock --policy /etc/busd/policy.conf
+Restart=on-failure
+RestartSec=100ms
+RuntimeDirectory=busd
+RuntimeDirectoryMode=0750
+User=root
+Group=busd
+# systemd serializes stop/start, so this removes only the service socket
+# left by a previous daemon instance.
+ExecStartPre=/usr/bin/rm -f /run/busd/busd.sock
+
+[Install]
+WantedBy=multi-user.target

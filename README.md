@@ -5,8 +5,10 @@
 The project is an early BUS/1 implementation. It establishes crate boundaries,
 the BUS/1-preview frame ABI and codec, authenticated native sessions, namespace
 and peer routing, filtered channels, broker discovery, requests, acknowledgements,
-deadlines, bounded retries, and versioned native authorization policy. FD passing
-and D-Bus interoperability are not implemented yet.
+deadlines, bounded retries, and versioned native authorization policy. The Unix
+transport also provides a bounded, ownership-safe `SCM_RIGHTS` primitive.
+FD-bearing BUS messages and memfd payload routing are not enabled by the broker
+until a negotiated protocol extension defines their forwarding semantics.
 
 ## Run
 
@@ -31,8 +33,10 @@ The default socket is `/run/busd/busd.sock`; its parent directory must be manage
 ## Client status
 
 `bus-client` opens an authenticated native session, performs `HELLO`/`WELCOME`,
-supports claims, subscriptions, namespace resolution, message delivery,
-acknowledgements, requests, responses, and bounded receiver-side deduplication.
+supports typed signals, requests, responses, claims, subscriptions, namespace
+resolution, acknowledgements, and bounded receiver-side deduplication. Use
+`ReconnectingBus` when a client must restore claims and subscriptions after a
+daemon restart; the restored session always accepts its new peer ID.
 
 See the [BUS/1-preview wire protocol](docs/wire-protocol.md) for the packet ABI.
 
@@ -61,6 +65,18 @@ use bus_client::{Bus, ConnectOptions};
 let bus = Bus::connect(ConnectOptions::new("/run/busd/busd.sock"))?;
 println!("connected as {}", bus.peer_id());
 bus.disconnect()?;
+```
+
+For a reconnecting client, retain durable session state in the public client
+wrapper:
+
+```rust,no_run
+use bus_client::{Channel, ConnectOptions, Namespace, ReconnectingBus};
+
+let mut bus = ReconnectingBus::connect(ConnectOptions::default())?;
+bus.claim(Namespace::parse("bus://example")?, Default::default())?;
+bus.subscribe(Channel::parse("events")?, Vec::new())?;
+let _new_peer = bus.reconnect()?;
 ```
 
 ## License
